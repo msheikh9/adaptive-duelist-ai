@@ -1,0 +1,30 @@
+window:
+  width: 1280
+  height: 720
+  title: "Adaptive Duelist"
+  fps_cap: 60
+
+colors:
+  background: [30, 30, 40]
+  arena_floor: [60, 60, 70]
+  player: [80, 160, 255]
+  ai: [255, 80, 80]
+  hp_bar_fill: [50, 200, 80]
+  hp_bar_empty: [80, 30, 30]
+  stamina_bar_fill: [220, 180, 40]
+  stamina_bar_empty: [60, 50, 20]
+  text_primary: [240, 240, 240]
+  text_secondary: [160, 160, 170]
+  hud_background: [20, 20, 30, 200]
+
+hud:
+  hp_bar_width: 300
+  hp_bar_height: 20
+  stamina_bar_width: 300
+  stamina_bar_height: 12
+  ai_panel_width: 320
+  ai_panel_height: 160
+  ai_panel_x: 940
+  ai_panel_y: 20
+  font_size_primary: 18
+  font_size_secondary: 14

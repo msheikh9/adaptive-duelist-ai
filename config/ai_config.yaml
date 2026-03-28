@@ -1,0 +1,61 @@
+prediction:
+  window_ticks: 60
+  window_extend_step: 15
+  window_max_ticks: 90
+  hold_extend_threshold: 0.40
+  markov_order: 3
+  min_confidence_for_display: 0.25
+  inference_reeval_idle_ticks: 30
+
+ensemble:
+  initial_markov_weight: 1.0
+  initial_sklearn_weight: 0.0
+  sklearn_activation_matches: 3
+  weight_update_ema_alpha: 0.3
+
+training:
+  min_matches_to_train: 3
+  min_samples_to_train: 300
+  retrain_after_every_n_matches: 1
+  random_forest_n_estimators: 100
+  random_forest_max_depth: 8
+  random_forest_min_samples_leaf: 10
+  holdout_fraction: 0.15
+
+strategy:
+  scoring_weights:
+    prediction_alignment: 1.0
+    hp_differential: 0.6
+    stamina_suitability: 0.5
+    historical_success: 0.8
+    exploration_bonus: 0.7
+    risk_penalty: 0.4
+    staleness_penalty: 0.6
+    consecutive_penalty: 0.5
+    exploration_pressure: 0.9
+    accuracy_trend: 0.4
+    shift_response: 0.7
+    mode_success_rate: 0.6
+  softmax_temperature: 0.5
+
+planner_memory:
+  recent_modes_capacity: 30
+  mode_outcome_capacity: 50
+  recent_predictions_capacity: 30
+  exploit_staleness_threshold_ticks: 300
+  exploration_budget_drain_rate: 0.03
+  exploration_budget_regen_rate: 0.15
+  exploration_budget_floor: 0.10
+  max_consecutive_before_penalty: 5
+  shift_detection_confidence_drop: 0.20
+  shift_probe_duration_decisions: 10
+
+action_resolver:
+  max_commit_delay_ticks: 30
+
+reaction:
+  min_reaction_ticks: 6
+
+profile:
+  recency_weight_multiplier: 3.0
+  rolling_window_size: 100

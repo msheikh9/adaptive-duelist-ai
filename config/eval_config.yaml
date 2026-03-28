@@ -1,0 +1,17 @@
+# Evaluation and regression detection configuration.
+#
+# These thresholds define the maximum allowed degradation from a baseline.
+# Used by scripts/check_regression.py and evaluation/regression_checker.py.
+
+regression_thresholds:
+  ai_win_rate_drop: 0.10          # AI win rate may drop by at most 10pp
+  avg_ticks_increase_pct: 0.25    # Avg match length may increase by at most 25%
+  hp_differential_drop: 30.0      # HP differential may drop by at most 30
+  prediction_accuracy_drop: 0.10  # Top-1 accuracy may drop by at most 10pp
+  planner_success_drop: 0.10      # Planner success rate may drop by at most 10pp
+  p95_tick_increase_pct: 0.50     # p95 tick latency may increase by at most 50%
+
+evaluation_defaults:
+  matches: 50
+  seed_start: 0
+  max_ticks: 20000

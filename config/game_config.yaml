@@ -1,0 +1,58 @@
+arena:
+  width: 1200
+  height: 400
+  ground_y: 300
+
+fighter:
+  width: 60
+  height: 100
+  max_hp: 200
+  max_stamina: 100
+  stamina_regen_idle: 3.0
+  stamina_regen_moving: 1.5
+  stamina_regen_attacking: 0.0
+  exhaustion_recovery_frames: 30
+  move_speed: 5
+
+spacing:
+  close_max: 150
+  mid_max: 350
+
+actions:
+  light_attack:
+    startup_frames: 4
+    active_frames: 3
+    recovery_frames: 8
+    stamina_cost: 15
+    damage: 8
+    reach: 80
+    hitstun_frames: 6
+    knockback: 30
+  heavy_attack:
+    startup_frames: 12
+    active_frames: 4
+    recovery_frames: 18
+    stamina_cost: 30
+    damage: 22
+    reach: 120
+    hitstun_frames: 12
+    knockback: 80
+  dodge_backward:
+    startup_frames: 2
+    active_frames: 6
+    recovery_frames: 8
+    stamina_cost: 20
+    distance: 150
+  block:
+    startup_frames: 3
+    stamina_cost_per_tick: 2
+    chip_damage_pct: 0.30
+    parry_window_frames: 3
+    blockstun_frames: 6
+    parry_stun_frames: 12
+  move:
+    stamina_cost_per_tick: 0.5
+
+simulation:
+  tick_rate: 60
+  sub_pixel_scale: 100
