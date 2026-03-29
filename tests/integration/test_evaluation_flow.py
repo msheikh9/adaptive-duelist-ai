@@ -170,3 +170,45 @@ class TestBaselineRoundtrip:
         report = check_regression(worse, path)
         assert not report.passed
         assert len(report.failures) > 0
+
+    def test_replay_regression_blocks_release(self, game_cfg, tmp_path):
+        """Baseline with perfect replays vs degraded current fails the gate."""
+        from evaluation.metrics import (
+            WinRateMetrics, MatchLengthMetrics, DamageMetrics,
+            PerformanceMetrics, ReplayVerificationMetrics,
+        )
+
+        # Create a baseline with perfect replay verification
+        result = run_evaluation(
+            n_matches=3,
+            seed_start=0,
+            tier=AITier.T0_BASELINE,
+            max_ticks=2000,
+            game_cfg=game_cfg,
+        )
+        # Inject perfect replay verification into the result
+        result.replay_verification = ReplayVerificationMetrics(
+            total_replays=10, passed=10, failed=0, pass_rate=1.0,
+        )
+        path = save_baseline(result, directory=tmp_path)
+
+        # Fabricate a current result with degraded replay pass rate
+        degraded = EvaluationResult(
+            tier=result.tier,
+            match_count=result.match_count,
+            seed_start=result.seed_start,
+            win_rate=result.win_rate,
+            match_length=result.match_length,
+            damage=result.damage,
+            prediction=None,
+            planner=None,
+            performance=result.performance,
+            replay_verification=ReplayVerificationMetrics(
+                total_replays=10, passed=8, failed=2, pass_rate=0.8,
+            ),
+        )
+
+        report = check_regression(degraded, path)
+        assert not report.passed
+        failed_metrics = [c.metric for c in report.failures]
+        assert "replay_pass_rate" in failed_metrics

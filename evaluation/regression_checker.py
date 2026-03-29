@@ -38,6 +38,8 @@ class ThresholdConfig:
     planner_success_drop: float = 0.10
     # Performance: p95 tick time may increase by at most this factor
     p95_tick_increase_pct: float = 0.50
+    # Replay: pass rate may drop by at most this much (0.0 = no failures allowed)
+    replay_pass_rate_drop: float = 0.0
 
 
 def load_threshold_config(path: Path | None = None) -> ThresholdConfig:
@@ -228,5 +230,23 @@ def check_regression(
     ))
     if not passed:
         report.passed = False
+
+    # --- Replay verification pass rate ---
+    bl_replay = baseline.get("replay_verification")
+    if bl_replay and current.replay_verification and bl_replay["total_replays"] > 0:
+        bl_rpr = bl_replay["pass_rate"]
+        cur_rpr = current.replay_verification.pass_rate
+        drop = bl_rpr - cur_rpr
+        passed = drop <= thresholds.replay_pass_rate_drop
+        report.checks.append(CheckResult(
+            metric="replay_pass_rate",
+            baseline_value=bl_rpr,
+            current_value=cur_rpr,
+            threshold=thresholds.replay_pass_rate_drop,
+            passed=passed,
+            detail=f"drop={drop:+.3f} (max allowed={thresholds.replay_pass_rate_drop})",
+        ))
+        if not passed:
+            report.passed = False
 
     return report

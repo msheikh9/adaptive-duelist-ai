@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS matches (
     ai_hp_final     INTEGER,
     rng_seed        INTEGER NOT NULL,
     model_version   TEXT,
-    config_hash     TEXT    NOT NULL
+    config_hash     TEXT    NOT NULL,
+    source          TEXT    NOT NULL DEFAULT 'human'
 );
 """
 

@@ -12,6 +12,7 @@ from evaluation.metrics import (
     PerformanceMetrics,
     PlannerSuccessMetrics,
     PredictionAccuracyMetrics,
+    ReplayVerificationMetrics,
     WinRateMetrics,
 )
 from evaluation.regression_checker import (
@@ -31,9 +32,10 @@ def _make_baseline(
     top1_acc=0.30,
     planner_sr=0.50,
     p95_tick=0.15,
+    replay_pass_rate=None,
 ) -> dict:
     """Build a baseline dict matching the save format."""
-    return {
+    bl = {
         "schema_version": 1,
         "tier": "T2_FULL_ADAPTIVE",
         "match_count": 50,
@@ -75,7 +77,16 @@ def _make_baseline(
             "p95_planner_ms": 0.10,
             "avg_ticks_per_sec": 50000.0,
         },
+        "replay_verification": None,
     }
+    if replay_pass_rate is not None:
+        bl["replay_verification"] = {
+            "total_replays": 10,
+            "passed": int(10 * replay_pass_rate),
+            "failed": 10 - int(10 * replay_pass_rate),
+            "pass_rate": replay_pass_rate,
+        }
+    return bl
 
 
 def _make_eval_result(
@@ -85,7 +96,16 @@ def _make_eval_result(
     top1_acc=0.30,
     planner_sr=0.50,
     p95_tick=0.15,
+    replay_pass_rate=None,
 ) -> EvaluationResult:
+    replay = None
+    if replay_pass_rate is not None:
+        replay = ReplayVerificationMetrics(
+            total_replays=10,
+            passed=int(10 * replay_pass_rate),
+            failed=10 - int(10 * replay_pass_rate),
+            pass_rate=replay_pass_rate,
+        )
     return EvaluationResult(
         tier="T2_FULL_ADAPTIVE",
         match_count=50,
@@ -116,6 +136,7 @@ def _make_eval_result(
             p95_tick_ms=p95_tick, p95_planner_ms=0.10,
             avg_ticks_per_sec=50000.0,
         ),
+        replay_verification=replay,
     )
 
 
@@ -230,6 +251,53 @@ class TestCheckRegression:
         report = check_regression(current, bl_path)
         wr_check = next(c for c in report.checks if c.metric == "ai_win_rate")
         assert wr_check.passed
+
+    def test_replay_pass_rate_regression(self, tmp_path):
+        """Any drop in replay pass rate should fail with default threshold (0.0)."""
+        bl = _make_baseline(replay_pass_rate=1.0)
+        bl_path = tmp_path / "baseline.json"
+        bl_path.write_text(json.dumps(bl))
+
+        current = _make_eval_result(replay_pass_rate=0.8)
+        report = check_regression(current, bl_path)
+        assert not report.passed
+        failed = [c.metric for c in report.failures]
+        assert "replay_pass_rate" in failed
+
+    def test_replay_pass_rate_within_threshold(self, tmp_path):
+        """Perfect replay on both sides should pass."""
+        bl = _make_baseline(replay_pass_rate=1.0)
+        bl_path = tmp_path / "baseline.json"
+        bl_path.write_text(json.dumps(bl))
+
+        current = _make_eval_result(replay_pass_rate=1.0)
+        report = check_regression(current, bl_path)
+        rp_check = next(c for c in report.checks if c.metric == "replay_pass_rate")
+        assert rp_check.passed
+
+    def test_replay_skipped_when_absent(self, tmp_path):
+        """No replay data on either side should not produce a replay check."""
+        bl = _make_baseline()  # replay_verification = None
+        bl_path = tmp_path / "baseline.json"
+        bl_path.write_text(json.dumps(bl))
+
+        current = _make_eval_result()
+        report = check_regression(current, bl_path)
+        metrics = [c.metric for c in report.checks]
+        assert "replay_pass_rate" not in metrics
+
+    def test_replay_corruption_blocks_release(self, tmp_path):
+        """Even a single replay failure from perfect baseline should block."""
+        bl = _make_baseline(replay_pass_rate=1.0)
+        bl_path = tmp_path / "baseline.json"
+        bl_path.write_text(json.dumps(bl))
+
+        # 9/10 pass = 0.9 pass rate, a 0.1 drop from 1.0
+        current = _make_eval_result(replay_pass_rate=0.9)
+        report = check_regression(current, bl_path)
+        assert not report.passed
+        rp_check = next(c for c in report.checks if c.metric == "replay_pass_rate")
+        assert not rp_check.passed
 
 
 class TestLoadThresholdConfig:

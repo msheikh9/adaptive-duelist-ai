@@ -57,6 +57,7 @@ def _run_planner_match_instrumented(
     game_cfg, ai_cfg, db: Database,
     seed: int, tier: AITier, max_ticks: int,
     match_id: str,
+    force_sklearn: bool = False,
 ) -> dict:
     """Run a T1/T2 match, collecting per-tick and planner latency samples."""
     from ai.layers.behavior_model import BehaviorModel
@@ -78,6 +79,8 @@ def _run_planner_match_instrumented(
     bm = BehaviorModel(db, ai_cfg, game_cfg)
     bm.load_profile()
     pe = PredictionEngine(db, bm, ai_cfg, game_cfg)
+    if force_sklearn:
+        pe.try_load_sklearn(force=True)
     planner = TacticalPlanner(db, pe, ai_cfg, game_cfg, tier)
 
     scale = game_cfg.simulation.sub_pixel_scale
@@ -187,6 +190,7 @@ def run_evaluation(
     game_cfg=None,
     ai_cfg=None,
     replay_dir: Path | None = None,
+    candidate_model_path: Path | None = None,
 ) -> EvaluationResult:
     """Run a deterministic evaluation batch and return all metrics.
 
@@ -219,6 +223,14 @@ def run_evaluation(
         db.connect()
         run_migrations(db)
 
+        if candidate_model_path is not None:
+            db.execute_safe(
+                """INSERT INTO model_registry
+                   (version, model_path, model_type, is_active, metadata)
+                   VALUES ('candidate', ?, 'random_forest', 1, '{}')""",
+                (str(candidate_model_path),),
+            )
+
     results: list[dict] = []
     for i in range(n_matches):
         seed = seed_start + i
@@ -229,6 +241,7 @@ def run_evaluation(
             match_ids.append(mid)
             r = _run_planner_match_instrumented(
                 game_cfg, ai_cfg, db, seed, tier, max_ticks, mid,
+                force_sklearn=(candidate_model_path is not None),
             )
         results.append(r)
 

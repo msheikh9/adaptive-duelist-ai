@@ -10,6 +10,7 @@ regression_thresholds:
   prediction_accuracy_drop: 0.10  # Top-1 accuracy may drop by at most 10pp
   planner_success_drop: 0.10      # Planner success rate may drop by at most 10pp
   p95_tick_increase_pct: 0.50     # p95 tick latency may increase by at most 50%
+  replay_pass_rate_drop: 0.0      # Replay pass rate may not drop at all (hard gate)
 
 evaluation_defaults:
   matches: 50

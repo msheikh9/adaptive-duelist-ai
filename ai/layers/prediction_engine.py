@@ -97,10 +97,15 @@ class PredictionEngine:
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
-    def try_load_sklearn(self) -> None:
-        """Attempt to load the active sklearn model from the registry."""
+    def try_load_sklearn(self, force: bool = False) -> None:
+        """Attempt to load the active sklearn model from the registry.
+
+        Args:
+            force: If True, bypasses the match_count activation check.
+                   Used during candidate model evaluation.
+        """
         match_count = self._bm.profile.match_count
-        if match_count < self._sklearn_activation_matches:
+        if not force and match_count < self._sklearn_activation_matches:
             log.info(
                 "Sklearn not activated: %d/%d matches.",
                 match_count, self._sklearn_activation_matches,

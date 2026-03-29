@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from data.migrations.v001_initial import apply as apply_v001
 from data.migrations.v002_profile_accumulators import apply as apply_v002
+from data.migrations.v003_matches_source import apply as apply_v003
 
 if TYPE_CHECKING:
     from data.db import Database
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 MIGRATIONS: list[tuple[int, callable]] = [
     (1, apply_v001),
     (2, apply_v002),
+    (3, apply_v003),
 ]
 
 

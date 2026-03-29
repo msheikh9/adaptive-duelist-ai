@@ -45,6 +45,18 @@ WHERE event_type = 'COMMITMENT_START' AND actor = 'PLAYER'
 ORDER BY match_id, tick_id;
 """
 
+_EVENTS_SQL_SOURCE_FILTERED = """
+SELECT
+    se.match_id, se.tick_id, se.commitment, se.opponent_fsm_state,
+    se.spacing_zone, se.actor_hp, se.opponent_hp,
+    se.actor_stamina, se.opponent_stamina, se.reaction_ticks
+FROM semantic_events se
+JOIN matches m ON se.match_id = m.match_id
+WHERE se.event_type = 'COMMITMENT_START' AND se.actor = 'PLAYER'
+  AND m.source = ?
+ORDER BY se.match_id, se.tick_id;
+"""
+
 
 def _reconstruct_event(row, match_id: str) -> tuple:
     """Convert a DB row into the fields needed for feature extraction.
@@ -89,6 +101,7 @@ def build_dataset(
     max_stamina: int,
     tick_rate: int,
     window_ticks: int = 60,
+    source_filter: str | None = None,
 ) -> tuple[list[list[float]], list[str]]:
     """Build (X, y) from all stored semantic events.
 
@@ -99,7 +112,10 @@ def build_dataset(
 
     Rows are in chronological order. No shuffling is applied.
     """
-    rows = db.fetchall(_EVENTS_SQL)
+    if source_filter is not None:
+        rows = db.fetchall(_EVENTS_SQL_SOURCE_FILTERED, (source_filter,))
+    else:
+        rows = db.fetchall(_EVENTS_SQL)
     if not rows:
         return [], []
 
