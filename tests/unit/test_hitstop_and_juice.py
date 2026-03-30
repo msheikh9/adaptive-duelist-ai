@@ -179,7 +179,7 @@ class TestHitJuice:
         hit = self._make_hit_event(is_heavy=False)
         engine._apply_hit_juice(hit, 1000, 2000)
         assert len(engine._pending_hit_vfx) == 1
-        x_sub, y_sub, is_heavy = engine._pending_hit_vfx[0]
+        x_sub, y_sub, is_heavy, kind = engine._pending_hit_vfx[0]
         assert x_sub == 1000
         assert y_sub == 2000
         assert is_heavy is False
@@ -189,7 +189,7 @@ class TestHitJuice:
         engine._start_match()
         hit = self._make_hit_event(is_heavy=True)
         engine._apply_hit_juice(hit, 0, 0)
-        _, _, is_heavy = engine._pending_hit_vfx[0]
+        _, _, is_heavy, kind = engine._pending_hit_vfx[0]
         assert is_heavy is True
 
     def test_start_match_clears_juice_state(self, engine_factory):

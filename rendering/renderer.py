@@ -17,6 +17,13 @@ Phase 15 additions:
   - Impact particle system (spawn_hit_particles, _update_draw_particles)
   - Screen shake (shake_x/shake_y params, copy-blit technique)
   - New FSM state tints: AIRBORNE, JUMP_STARTUP, LANDING
+
+Phase 17 additions:
+  - spawn_hit_particles() accepts kind= ("light","heavy","dodge","whiff")
+  - render() accepts player_whiff, ai_whiff, player_dodge_cd, ai_dodge_cd
+  - Whiff tint on attacker when whiff flash is active
+  - Dodge cooldown pip in HUD below stamina bar
+  - Floating damage text (_FloatText, spawn_damage_text)
 """
 
 from __future__ import annotations
@@ -48,6 +55,17 @@ class _Particle:
     color: tuple[int, int, int]
 
 
+@dataclass
+class _FloatText:
+    """Floating damage number (renderer-side, purely cosmetic)."""
+    x: float
+    y: float
+    text: str
+    lifetime: int
+    max_lifetime: int
+    color: tuple[int, int, int]
+
+
 class Renderer:
     """Draws the game state to a pygame window."""
 
@@ -73,6 +91,9 @@ class Renderer:
         self._particles: list[_Particle] = []
         self._particle_rng = random.Random(42)  # fixed seed → deterministic sparks
 
+        # Phase 17: floating damage text
+        self._float_texts: list[_FloatText] = []
+
     def init(self) -> pygame.Surface:
         pygame.display.set_caption(self._dcfg.window.title)
         self._screen = pygame.display.set_mode(
@@ -90,28 +111,41 @@ class Renderer:
     # Particle system
     # ------------------------------------------------------------------
 
-    def spawn_hit_particles(self, x_sub: int, y_sub: int, is_heavy: bool) -> None:
+    def spawn_hit_particles(self, x_sub: int, y_sub: int, is_heavy: bool,
+                            kind: str = "light") -> None:
         """Spawn impact particles at the given sub-pixel position.
 
         Called by the engine with the defender's sub-pixel coords.
-        Converts to screen coords internally.
+        kind ∈ {"light", "heavy", "dodge", "whiff"}
         """
         if self._screen is None:
             return
 
-        scale     = self._scale
-        arena_y   = self._arena_y()
-        fw        = self._gcfg.fighter.width
-        fh        = self._gcfg.fighter.height
+        scale   = self._scale
+        arena_y = self._arena_y()
+        fh      = self._gcfg.fighter.height
 
-        screen_x   = 40 + x_sub // scale
-        y_offset   = (y_sub - self._ground_y_sub) // scale
-        screen_y   = arena_y - fh // 2 + y_offset   # mid-body of fighter
+        screen_x = 40 + x_sub // scale
+        y_offset = (y_sub - self._ground_y_sub) // scale
+        screen_y = arena_y - fh // 2 + y_offset  # mid-body of fighter
 
-        n         = 8 if is_heavy else 5
-        speed     = 5.0 if is_heavy else 3.0
-        lifetime  = 14 if is_heavy else 9
-        color     = (255, 210, 60) if is_heavy else (255, 255, 160)
+        # Backward compat: is_heavy=True without explicit kind → heavy burst
+        if kind == "light" and is_heavy:
+            kind = "heavy"
+
+        # Per-kind particle parameters
+        if kind == "heavy":
+            n, speed, lifetime = 10, 5.5, 15
+            color = (255, 130, 40)   # orange-red
+        elif kind == "dodge":
+            n, speed, lifetime = 6, 4.0, 11
+            color = (80, 200, 220)   # teal/cyan
+        elif kind == "whiff":
+            n, speed, lifetime = 3, 1.8, 7
+            color = (140, 140, 140)  # grey puff
+        else:  # "light"
+            n, speed, lifetime = 6, 3.2, 10
+            color = (255, 255, 160)  # pale yellow
 
         rng = self._particle_rng
         for i in range(n):
@@ -121,11 +155,36 @@ class Renderer:
                 x=float(screen_x),
                 y=float(screen_y),
                 vx=math.cos(angle) * spd,
-                vy=math.sin(angle) * spd - 1.0,   # slight upward bias
+                vy=math.sin(angle) * spd - 1.0,  # slight upward bias
                 lifetime=lifetime,
                 max_lifetime=lifetime,
                 color=color,
             ))
+
+    def spawn_damage_text(self, amount: int, x_sub: int, y_sub: int,
+                          is_heavy: bool) -> None:
+        """Spawn a floating damage number above the hit location."""
+        if self._screen is None:
+            return
+
+        scale   = self._scale
+        arena_y = self._arena_y()
+        fh      = self._gcfg.fighter.height
+
+        screen_x = float(40 + x_sub // scale)
+        y_offset = (y_sub - self._ground_y_sub) // scale
+        screen_y = float(arena_y - fh + y_offset - 8)  # above fighter top
+
+        color    = (255, 130, 40) if is_heavy else (255, 255, 160)
+        lifetime = 28 if is_heavy else 22
+        self._float_texts.append(_FloatText(
+            x=screen_x,
+            y=screen_y,
+            text=f"-{amount}",
+            lifetime=lifetime,
+            max_lifetime=lifetime,
+            color=color,
+        ))
 
     def _update_draw_particles(self, screen: pygame.Surface) -> None:
         """Advance and draw all active particles. Called each render frame."""
@@ -146,6 +205,27 @@ class Renderer:
             alive.append(p)
         self._particles = alive
 
+    def _update_draw_float_texts(self, screen: pygame.Surface) -> None:
+        """Advance and draw all active floating damage texts."""
+        if self._tiny_font is None:
+            return
+        alive: list[_FloatText] = []
+        for ft in self._float_texts:
+            ft.lifetime -= 1
+            if ft.lifetime <= 0:
+                continue
+            ft.y -= 0.6  # float upward
+            frac  = ft.lifetime / ft.max_lifetime
+            alpha = max(0, int(255 * frac))
+            r = ft.color[0]
+            g = ft.color[1]
+            b = ft.color[2]
+            surf = self._tiny_font.render(ft.text, True, (r, g, b))
+            surf.set_alpha(alpha)
+            screen.blit(surf, (int(ft.x) - surf.get_width() // 2, int(ft.y)))
+            alive.append(ft)
+        self._float_texts = alive
+
     # ------------------------------------------------------------------
     # Main render entry-point
     # ------------------------------------------------------------------
@@ -157,18 +237,26 @@ class Renderer:
         show_help: bool = False,
         player_flash: int = 0,
         ai_flash: int = 0,
+        player_whiff: int = 0,
+        ai_whiff: int = 0,
+        player_dodge_cd: int = 0,
+        ai_dodge_cd: int = 0,
         shake_x: int = 0,
         shake_y: int = 0,
     ) -> None:
         """Render one frame of the game.
 
         Args:
-            state:        Current simulation state (read-only).
-            show_help:    If True, draw the controls overlay on top.
-            player_flash: Ticks remaining for player hit-flash effect.
-            ai_flash:     Ticks remaining for AI hit-flash effect.
-            shake_x:      Horizontal screen-shake offset (pixels).
-            shake_y:      Vertical screen-shake offset (pixels).
+            state:           Current simulation state (read-only).
+            show_help:       If True, draw the controls overlay on top.
+            player_flash:    Ticks remaining for player hit-flash effect.
+            ai_flash:        Ticks remaining for AI hit-flash effect.
+            player_whiff:    Ticks remaining for player whiff-flash effect.
+            ai_whiff:        Ticks remaining for AI whiff-flash effect.
+            player_dodge_cd: Remaining dodge cooldown ticks for the player.
+            ai_dodge_cd:     Remaining dodge cooldown ticks for the AI.
+            shake_x:         Horizontal screen-shake offset (pixels).
+            shake_y:         Vertical screen-shake offset (pixels).
         """
         if self._screen is None:
             return
@@ -186,15 +274,17 @@ class Renderer:
         # ------------------------------------------------------------------
         # Fighters
         # ------------------------------------------------------------------
+        max_dodge_cd = self._gcfg.actions.dodge_backward.cooldown_frames
         self._draw_fighter(screen, state.player, colors.player, arena_render_y,
-                           "PLAYER", player_flash)
+                           "PLAYER", player_flash, whiff_ticks=player_whiff)
         self._draw_fighter(screen, state.ai, colors.ai, arena_render_y,
-                           "AI", ai_flash)
+                           "AI", ai_flash, whiff_ticks=ai_whiff)
 
         # ------------------------------------------------------------------
         # HUD
         # ------------------------------------------------------------------
-        self._draw_hud(screen, state)
+        self._draw_hud(screen, state, player_dodge_cd=player_dodge_cd,
+                       ai_dodge_cd=ai_dodge_cd, max_dodge_cd=max_dodge_cd)
 
         # ------------------------------------------------------------------
         # Match-end overlay
@@ -221,6 +311,11 @@ class Renderer:
         # Phase 15: impact particles (drawn on top, unaffected by shake)
         # ------------------------------------------------------------------
         self._update_draw_particles(screen)
+
+        # ------------------------------------------------------------------
+        # Phase 17: floating damage text (on top of particles)
+        # ------------------------------------------------------------------
+        self._update_draw_float_texts(screen)
 
         pygame.display.flip()
 
@@ -310,7 +405,9 @@ class Renderer:
     # HUD
     # ------------------------------------------------------------------
 
-    def _draw_hud(self, screen: pygame.Surface, state: SimulationState) -> None:
+    def _draw_hud(self, screen: pygame.Surface, state: SimulationState,
+                  player_dodge_cd: int = 0, ai_dodge_cd: int = 0,
+                  max_dodge_cd: int = 45) -> None:
         colors  = self._dcfg.colors
         gcfg    = self._gcfg
         hud     = self._dcfg.hud
@@ -324,12 +421,14 @@ class Renderer:
         self._draw_fighter_hud(
             screen, state.player, gcfg.fighter.max_hp, gcfg.fighter.max_stamina,
             LEFT_X, 16, "PLAYER", align="left",
+            dodge_cd=player_dodge_cd, max_dodge_cd=max_dodge_cd,
         )
 
         # ---- AI side (right) ----
         self._draw_fighter_hud(
             screen, state.ai, gcfg.fighter.max_hp, gcfg.fighter.max_stamina,
             RIGHT_X, 16, "AI", align="right",
+            dodge_cd=ai_dodge_cd, max_dodge_cd=max_dodge_cd,
         )
 
         # ---- Center info: tier badge + tick ----
@@ -351,6 +450,8 @@ class Renderer:
         y: int,
         label: str,
         align: str = "left",
+        dodge_cd: int = 0,
+        max_dodge_cd: int = 45,
     ) -> None:
         colors = self._dcfg.colors
         hud    = self._dcfg.hud
@@ -398,8 +499,20 @@ class Renderer:
         self._draw_bar(screen, x, stm_y, BAR_W, STM_H,
                        stm_frac, stm_fill_color, colors.stamina_bar_empty, colors.border)
 
+        # Phase 17: dodge cooldown pip (thin bar below stamina)
+        dodge_y = stm_y + STM_H + 2
+        if max_dodge_cd > 0 and dodge_cd > 0:
+            cd_frac = dodge_cd / max_dodge_cd
+            # Filled portion shows remaining cooldown (red → fades left as it counts down)
+            self._draw_bar(screen, x, dodge_y, BAR_W, 3,
+                           cd_frac, (200, 80, 80), (40, 40, 40), colors.border)
+        else:
+            # Ready: draw a dim green ready indicator
+            self._draw_bar(screen, x, dodge_y, BAR_W, 3,
+                           1.0, (60, 140, 60), (40, 40, 40), colors.border)
+
         # FSM state label
-        state_y = stm_y + STM_H + 4
+        state_y = dodge_y + 3 + 4
         fsm_surf = self._tiny_font.render(
             fighter.fsm_state.name.replace("_", " "), True, colors.text_secondary
         )
@@ -464,6 +577,7 @@ class Renderer:
         arena_y: int,
         label: str,
         flash_ticks: int = 0,
+        whiff_ticks: int = 0,
     ) -> None:
         gcfg   = self._gcfg
         colors = self._dcfg.colors
@@ -488,6 +602,9 @@ class Renderer:
         state = fighter.fsm_state
         if flash_ticks > 0:
             draw_color = colors.hit_flash
+        elif whiff_ticks > 0:
+            # Attacker whiffed: dim desaturated yellow-grey
+            draw_color = (160, 150, 80)
         elif state == FSMState.HITSTUN:
             draw_color = (255, 255, 255)
         elif state == FSMState.ATTACK_ACTIVE:
