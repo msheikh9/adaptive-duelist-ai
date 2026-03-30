@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Adaptive Duelist AI — Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Adaptive Duelist AI</h1>
+    <span id="status-badge">connecting…</span>
+  </header>
+
+  <main>
+
+    <!-- System Stats -->
+    <div class="card" id="section-stats">
+      <h2>System Stats</h2>
+      <div class="stats-grid">
+        <div class="stat-item">
+          <div class="stat-value" id="stat-total-matches">—</div>
+          <div class="stat-label">Total Matches</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="stat-human">—</div>
+          <div class="stat-label">Human</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="stat-selfplay">—</div>
+          <div class="stat-label">Self-Play</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="stat-model" style="font-size:1.1rem">—</div>
+          <div class="stat-label">Active Model</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Matches -->
+    <div class="card" id="section-recent">
+      <h2>Recent Matches</h2>
+      <table id="recent-table">
+        <thead>
+          <tr>
+            <th>Match ID</th>
+            <th>Winner</th>
+            <th>Player HP</th>
+            <th>AI HP</th>
+            <th>Ticks</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody id="recent-tbody">
+          <tr><td colspan="6" style="color:#4b5563">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Self-Play -->
+    <div class="card" id="section-selfplay">
+      <h2>Generate Self-Play Data</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Matches</label>
+          <input type="number" id="sp-matches" value="10" min="1" max="500">
+        </div>
+        <div class="form-group">
+          <label>Seed</label>
+          <input type="number" id="sp-seed" value="0">
+        </div>
+        <div class="form-group">
+          <label>Max Ticks</label>
+          <input type="number" id="sp-max-ticks" value="5000" min="100">
+        </div>
+        <button id="sp-run-btn" onclick="runSelfPlay()">Run</button>
+      </div>
+      <div id="sp-result" class="result-box hidden"></div>
+    </div>
+
+    <!-- Evaluate -->
+    <div class="card" id="section-evaluate">
+      <h2>Evaluate AI</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Matches</label>
+          <input type="number" id="ev-matches" value="5" min="1" max="200">
+        </div>
+        <div class="form-group">
+          <label>Tier</label>
+          <select id="ev-tier">
+            <option value="T2_FULL_ADAPTIVE">T2 Full Adaptive</option>
+            <option value="T1_MARKOV_ONLY">T1 Markov Only</option>
+            <option value="T0_BASELINE">T0 Baseline</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Seed</label>
+          <input type="number" id="ev-seed" value="0">
+        </div>
+        <button id="ev-run-btn" onclick="runEvaluate()">Evaluate</button>
+      </div>
+      <div id="ev-result" class="result-box hidden"></div>
+    </div>
+
+    <!-- Training -->
+    <div class="card" id="section-training">
+      <h2>Training Pipeline</h2>
+      <div id="train-status" class="stats-grid" style="margin-bottom:1rem">
+        <div class="stat-item">
+          <div class="stat-value" id="ts-delta">—</div>
+          <div class="stat-label">New Matches</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="ts-threshold">—</div>
+          <div class="stat-label">Retrain Threshold</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="ts-needed">—</div>
+          <div class="stat-label">Retrain Needed</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <button id="train-run-btn" onclick="runTraining(false)">Run Pipeline</button>
+        <button id="train-promote-btn" onclick="runTraining(true)">Run + Auto-Promote</button>
+        <button id="curriculum-btn" onclick="runCurriculum()">Curriculum Cycle</button>
+      </div>
+      <div id="train-result" class="result-box hidden"></div>
+    </div>
+
+    <!-- Models -->
+    <div class="card" id="section-models">
+      <h2>Model Registry</h2>
+      <div id="model-list" style="color:#4b5563;font-size:0.85rem">Loading…</div>
+    </div>
+
+    <!-- Baseline & Regression -->
+    <div class="card" id="section-regression">
+      <h2>Baseline &amp; Regression</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Matches</label>
+          <input type="number" id="bl-matches" value="5" min="1" max="200">
+        </div>
+        <div class="form-group">
+          <label>Tag</label>
+          <input type="text" id="bl-tag" value="" placeholder="e.g. v1.0">
+        </div>
+        <div class="form-group">
+          <label>Tier</label>
+          <select id="bl-tier">
+            <option value="T2_FULL_ADAPTIVE">T2 Full Adaptive</option>
+            <option value="T1_MARKOV_ONLY">T1 Markov Only</option>
+          </select>
+        </div>
+        <button onclick="createBaseline()">Create Baseline</button>
+        <button onclick="checkRegression()">Check Regression</button>
+      </div>
+      <div id="bl-result" class="result-box hidden"></div>
+    </div>
+
+    <!-- Match Report -->
+    <div class="card" id="section-report">
+      <h2>Match Report</h2>
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>Match ID</label>
+          <input type="text" id="report-match-id" placeholder="eval-T2_FULL_ADAPTIVE-000000" style="width:100%">
+        </div>
+        <button onclick="fetchReport()">Fetch Report</button>
+      </div>
+      <div id="report-result" class="result-box hidden"></div>
+    </div>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -52,6 +52,10 @@ _FSM_ORD: dict[FSMState, float] = {
     FSMState.PARRY_STUNNED: 1.0,
     FSMState.EXHAUSTED: 1.0,
     FSMState.KO: 1.0,
+    # Phase 15: air states
+    FSMState.JUMP_STARTUP: 0.5,
+    FSMState.AIRBORNE: 0.5,
+    FSMState.LANDING: 1.0,
 }
 
 

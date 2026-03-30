@@ -23,8 +23,10 @@ from ai.strategy.tactics import TacticalIntent
 from game.combat.actions import FSMState, SpacingZone
 
 if TYPE_CHECKING:
+    from ai.profile.archetype_classifier import ArchetypeLabel
     from ai.strategy.ai_context import AIContext
     from ai.strategy.planner_memory import PlannerMemory
+    from ai.strategy.session_memory import SessionMemory
     from config.config_loader import StrategyConfig, PlannerMemoryConfig
 
 ALL_MODES = list(TacticalIntent)
@@ -36,6 +38,9 @@ def select_mode(
     strategy_cfg: StrategyConfig,
     memory_cfg: PlannerMemoryConfig,
     rng: random.Random,
+    session_memory: "SessionMemory | None" = None,
+    archetype: "ArchetypeLabel | None" = None,
+    archetype_table: dict | None = None,
 ) -> TacticalIntent:
     """Score all tactical modes and select one.
 
@@ -56,7 +61,9 @@ def select_mode(
     for mode in ALL_MODES:
         base = _base_score(mode, ctx, w)
         adj = _memory_adjustments(mode, ctx, memory, memory_cfg, w)
-        scores[mode] = base + adj
+        sess = _session_adjustments(mode, session_memory, archetype,
+                                    archetype_table or {}, w)
+        scores[mode] = base + adj + sess
 
     return _softmax_select(scores, strategy_cfg.softmax_temperature, rng)
 
@@ -180,6 +187,41 @@ def _memory_adjustments(
     # 6. Historical mode success rate
     success = memory.per_mode_success_rate(mode)
     adj += w.mode_success_rate * (success - 0.5)  # center at 0.5
+
+    return adj
+
+
+# ------------------------------------------------------------------ #
+# Session-level adjustments                                            #
+# ------------------------------------------------------------------ #
+
+def _session_adjustments(
+    mode: TacticalIntent,
+    session_memory: "SessionMemory | None",
+    archetype: "ArchetypeLabel | None",
+    archetype_table: dict,
+    w,
+) -> float:
+    """Two optional adjustments driven by cross-match session data.
+
+    Both are no-ops when their inputs are None or empty, preserving
+    existing behaviour for callers that don't pass session context.
+    """
+    adj = 0.0
+
+    # 1. Session mode success rate (replaces / supplements historical_success
+    #    when enough cross-match data has accumulated)
+    if session_memory is not None:
+        rate = session_memory.mode_success_rate(mode)
+        if rate is not None:
+            adj += w.session_success_rate * (rate - 0.5)  # centred at 0.5
+
+    # 2. Archetype alignment bonus/penalty
+    if archetype is not None and archetype_table:
+        mode_row = archetype_table.get(mode.name, {})
+        bonus = mode_row.get(archetype.name, 0.0)
+        if isinstance(bonus, (int, float)):
+            adj += w.archetype_alignment * float(bonus)
 
     return adj
 

@@ -6,7 +6,7 @@ Vocabulary B (CombatCommitment). The AI never sees InputAction.
 
 from __future__ import annotations
 
-from game.combat.actions import CombatCommitment
+from game.combat.actions import CombatCommitment, FSMState
 from game.entities.fighter import attempt_commitment, attempt_stop_move
 from game.input.input_actions import InputAction
 from game.state import FighterState
@@ -53,6 +53,12 @@ class PlayerController:
                 case InputAction.PRESS_DODGE:
                     if attempt_commitment(fighter, CombatCommitment.DODGE_BACKWARD, config):
                         committed = CombatCommitment.DODGE_BACKWARD
+
+                case InputAction.PRESS_JUMP:
+                    # Jump is only valid from ground-level free states
+                    if (fighter.fsm_state in (FSMState.IDLE, FSMState.MOVING)
+                            and attempt_commitment(fighter, CombatCommitment.JUMP, config)):
+                        committed = CombatCommitment.JUMP
 
         # Handle movement from held keys (only if no attack/dodge was committed)
         if committed is None and fighter.is_free:

@@ -13,6 +13,10 @@ fighter:
   stamina_regen_attacking: 0.0
   exhaustion_recovery_frames: 30
   move_speed: 5
+  jump_velocity: 15
+  jump_gravity: 1
+  jump_startup_frames: 3
+  landing_recovery_frames: 5
 
 spacing:
   close_max: 150
@@ -38,11 +42,12 @@ actions:
     hitstun_frames: 12
     knockback: 80
   dodge_backward:
-    startup_frames: 2
-    active_frames: 6
-    recovery_frames: 8
-    stamina_cost: 20
-    distance: 150
+    startup_frames: 3
+    active_frames: 5
+    recovery_frames: 12
+    stamina_cost: 25
+    distance: 130
+    cooldown_frames: 45
   block:
     startup_frames: 3
     stamina_cost_per_tick: 2

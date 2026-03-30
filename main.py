@@ -67,8 +67,9 @@ def main() -> None:
     )
 
     from game.engine import Engine
+    from ai.layers.tactical_planner import AITier
 
-    engine = Engine(game_cfg, ai_cfg, display_cfg, db)
+    engine = Engine(game_cfg, ai_cfg, display_cfg, db, ai_tier=AITier.T2_FULL_ADAPTIVE)
     try:
         engine.run()
     finally:

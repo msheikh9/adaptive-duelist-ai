@@ -96,3 +96,25 @@ def check_hit(attacker: FighterState, defender: FighterState,
         knockback_sub=atk_cfg.knockback * config.simulation.sub_pixel_scale,
         knockback_direction=knockback_dir,
     )
+
+
+def was_dodge_avoided(attacker: FighterState, defender: FighterState,
+                      attacker_id: str, hit_tracker: HitTracker,
+                      config: GameConfig) -> bool:
+    """Return True if the attacker's hitbox would have connected but
+    the defender's dodge invulnerability absorbed it.
+
+    Conditions:
+    - Attacker is in ATTACK_ACTIVE and hasn't already connected this swing.
+    - Defender is in DODGING state (invulnerable).
+    - The hitbox and hurtbox actually overlap (real near-miss, not a whiff).
+    """
+    if hit_tracker.has_connected(attacker_id):
+        return False
+    hitbox = get_attack_hitbox(attacker, config)
+    if hitbox is None:
+        return False
+    if defender.fsm_state != FSMState.DODGING:
+        return False
+    hurtbox = get_fighter_hurtbox(defender, config)
+    return hitbox.overlaps(hurtbox)

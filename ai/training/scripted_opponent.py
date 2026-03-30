@@ -71,14 +71,30 @@ DECISION_INTERVAL_MAX = 40
 
 
 class ScriptedOpponent:
-    """Deterministic scripted fighter for the player slot in self-play."""
+    """Deterministic scripted fighter for the player slot in self-play.
 
-    def __init__(self, profile: ScriptedProfile, seed: int = 0) -> None:
+    Args:
+        profile:          Scripted behaviour profile.
+        seed:             RNG seed for determinism.
+        focus_commitment: Optional commitment to emphasise (weight ×2.5).
+                          Must be in PHASE_1_COMMITMENTS; ignored otherwise.
+    """
+
+    def __init__(
+        self,
+        profile: ScriptedProfile,
+        seed: int = 0,
+        focus_commitment: CombatCommitment | None = None,
+    ) -> None:
         self._base_profile = profile
         self._active_profile = profile
         self._rng = random.Random(seed)
         self._pattern_idx = 0
         self._ticks_until_decision = self._sample_interval()
+        # Validate: only Phase 1 commitments may be focused
+        if focus_commitment is not None and focus_commitment not in PHASE_1_COMMITMENTS:
+            focus_commitment = None
+        self._focus_commitment: CombatCommitment | None = focus_commitment
 
     def _sample_interval(self) -> int:
         return self._rng.randint(DECISION_INTERVAL_MIN, DECISION_INTERVAL_MAX)
@@ -136,6 +152,11 @@ class ScriptedOpponent:
                 for i, c in enumerate(valid):
                     if c == advance:
                         weights[i] *= 3.0
+
+        # Apply focus_commitment boost (×2.5) when set
+        if self._focus_commitment is not None and self._focus_commitment in valid:
+            focus_idx = valid.index(self._focus_commitment)
+            weights[focus_idx] *= 2.5
 
         return self._rng.choices(valid, weights=weights, k=1)[0]
 

@@ -26,6 +26,7 @@ from ai.models.base_predictor import LABEL_HOLD, PredictionResult, make_predicti
 from ai.strategy.action_resolver import ResolverOutput, resolve
 from ai.strategy.ai_context import AIContext
 from ai.strategy.planner_memory import ModeOutcome, PlannerMemory, PredictionOutcome
+from ai.strategy.session_memory import SessionMemory
 from ai.strategy.strategy_selector import select_mode
 from ai.strategy.tactics import TacticalIntent
 from game.arena import classify_spacing
@@ -40,6 +41,7 @@ from game.combat.state_machine import can_commit
 from game.entities.fighter import attempt_commitment
 
 if TYPE_CHECKING:
+    from ai.layers.behavior_model import BehaviorModel
     from config.config_loader import AIConfig, GameConfig
     from data.db import Database
     from game.state import FighterState, SimulationState
@@ -83,14 +85,21 @@ class TacticalPlanner:
         ai_cfg: AIConfig,
         game_cfg: GameConfig,
         tier: AITier = AITier.T2_FULL_ADAPTIVE,
+        behavior_model: "BehaviorModel | None" = None,
     ) -> None:
         self._db = db
         self._pe = prediction_engine
         self._ai_cfg = ai_cfg
         self._game_cfg = game_cfg
         self._tier = tier
+        self._behavior_model = behavior_model
 
         self._memory = PlannerMemory(ai_cfg.planner_memory)
+        # Session memory persists across matches — NOT reset on match start
+        self._session_memory = SessionMemory(
+            decay_factor=ai_cfg.session_adaptation.decay_factor,
+            min_samples=ai_cfg.session_adaptation.min_session_samples,
+        )
         self._rng = random.Random(42)
 
         # Per-match state
@@ -125,6 +134,10 @@ class TacticalPlanner:
     def memory(self) -> PlannerMemory:
         return self._memory
 
+    @property
+    def session_memory(self) -> SessionMemory:
+        return self._session_memory
+
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
@@ -147,8 +160,14 @@ class TacticalPlanner:
         self._last_prediction_confidence = 0.0
 
     def on_match_end(self) -> None:
-        """Nothing to persist — PlannerMemory is per-match."""
-        pass
+        """Aggregate match outcomes into session memory before match reset."""
+        if self._tier == AITier.T2_FULL_ADAPTIVE:
+            mode_stats: dict[str, tuple[int, int]] = {}
+            for outcome in self._memory.mode_outcome_log:
+                name = outcome.mode.name
+                s, t = mode_stats.get(name, (0, 0))
+                mode_stats[name] = (s + (1 if outcome.success else 0), t + 1)
+            self._session_memory.record_match_outcomes(mode_stats)
 
     # ------------------------------------------------------------------ #
     # Core decision                                                        #
@@ -198,12 +217,22 @@ class TacticalPlanner:
             self._last_prediction_label = prediction.top_label
             self._last_prediction_confidence = prediction.top_label_confidence
 
-        # Select tactical mode
+        # Resolve archetype if a behavior model is available
+        archetype = (
+            self._behavior_model.current_archetype()
+            if self._behavior_model is not None
+            else None
+        )
+
+        # Select tactical mode (session context passed when available)
         mode = select_mode(
             ctx, self._memory,
             self._ai_cfg.strategy,
             self._ai_cfg.planner_memory,
             self._rng,
+            session_memory=self._session_memory,
+            archetype=archetype,
+            archetype_table=self._ai_cfg.archetype_mode_alignment,
         )
 
         # Record mode in memory

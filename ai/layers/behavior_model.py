@@ -160,6 +160,19 @@ class BehaviorModel:
         """Return the Markov predictor's current prediction."""
         return self._predictor.predict()
 
+    def current_archetype(self):
+        """Return the inferred ArchetypeLabel for the current player.
+
+        Returns ArchetypeLabel.BALANCED when the player has fewer matches
+        than session_adaptation.min_matches_for_archetype, or when the
+        profile has too few observations for confident classification.
+        """
+        from ai.profile.archetype_classifier import ArchetypeLabel, classify_archetype
+        min_m = self._ai_cfg.session_adaptation.min_matches_for_archetype
+        if self._profile.match_count < min_m:
+            return ArchetypeLabel.BALANCED
+        return classify_archetype(self._profile)
+
     # ------------------------------------------------------------------ #
     # Persistence                                                          #
     # ------------------------------------------------------------------ #

@@ -36,6 +36,8 @@ strategy:
     accuracy_trend: 0.4
     shift_response: 0.7
     mode_success_rate: 0.6
+    session_success_rate: 0.25
+    archetype_alignment: 0.25
   softmax_temperature: 0.5
 
 planner_memory:
@@ -59,3 +61,28 @@ reaction:
 profile:
   recency_weight_multiplier: 3.0
   rolling_window_size: 100
+
+session_adaptation:
+  decay_factor: 0.8
+  min_matches_for_archetype: 2
+  archetype_alignment_weight: 0.25
+  session_success_weight: 0.25
+  min_session_samples: 5
+
+# Alignment bonus table: mode_name -> archetype_name -> score delta
+# Positive = boost that mode vs that archetype; negative = penalty.
+archetype_mode_alignment:
+  EXPLOIT_PATTERN:
+    PATTERNED: 0.20
+    AGGRESSIVE: 0.10
+    DEFENSIVE: -0.10
+  BAIT_AND_PUNISH:
+    AGGRESSIVE: 0.20
+    EVASIVE: 0.10
+  DEFENSIVE_RESET:
+    AGGRESSIVE: 0.25
+  PRESSURE_STAMINA:
+    DEFENSIVE: 0.15
+    EVASIVE: 0.10
+  PROBE_BEHAVIOR:
+    BALANCED: 0.10

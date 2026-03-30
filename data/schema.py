@@ -1,6 +1,6 @@
 """SQLite schema definitions. Single source of truth for all table DDL."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_VERSION_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_version (

@@ -1,7 +1,12 @@
-"""Physics system: position updates, arena clamping, knockback.
+"""Physics system: position updates, arena clamping, knockback, gravity.
 
 All positions are in sub-pixel units (int32). No floating point in
 position math. Velocity is in sub-pixel units per tick.
+
+Phase 15 additions:
+  - apply_gravity()  — downward acceleration when above ground
+  - handle_landing() — clamp to floor and report touch-down events
+  - apply_velocity() now also applies velocity_y (vertical)
 """
 
 from __future__ import annotations
@@ -12,8 +17,9 @@ from config.config_loader import GameConfig
 
 
 def apply_velocity(fighter: FighterState) -> None:
-    """Apply velocity to position. Single tick update."""
+    """Apply velocity to position. Single tick update (horizontal + vertical)."""
     fighter.x += fighter.velocity_x
+    fighter.y += fighter.velocity_y
 
 
 def apply_dodge_velocity(fighter: FighterState, config: GameConfig) -> None:
@@ -34,11 +40,40 @@ def apply_dodge_velocity(fighter: FighterState, config: GameConfig) -> None:
     fighter.velocity_x = -fighter.facing * velocity_per_frame
 
 
+def apply_gravity(fighter: FighterState, arena: ArenaState,
+                  config: GameConfig) -> None:
+    """Apply downward gravity when fighter is above ground level.
+
+    Gravity is applied regardless of FSM state so that fighters in
+    HITSTUN or KO also fall back to the floor naturally.
+    """
+    if fighter.y < arena.ground_y_sub:
+        fighter.velocity_y += config.fighter.jump_gravity * config.simulation.sub_pixel_scale
+
+
+def handle_landing(fighter: FighterState, arena: ArenaState) -> bool:
+    """Clamp fighter to ground if they've descended to or past floor level.
+
+    Returns True if the fighter was in downward flight and just touched
+    down (i.e. a landing event occurred that the caller should act on).
+    The caller is responsible for FSM transitions (enter_landing / etc.).
+    """
+    if fighter.y >= arena.ground_y_sub:
+        just_landed = fighter.velocity_y > 0  # was moving downward
+        if just_landed:
+            fighter.y = arena.ground_y_sub
+            fighter.velocity_y = 0
+        return just_landed
+    return False
+
+
 def clamp_to_arena(fighter: FighterState, arena: ArenaState,
                    fighter_width_sub: int) -> None:
     """Clamp fighter position to arena boundaries.
 
-    Fighters cannot move past the left (0) or right (arena_width - fighter_width) edges.
+    Horizontal: fighters cannot move past the left/right edges.
+    Vertical ceiling: fighters cannot go above the arena top (y < 0).
+    Floor clamping is handled separately by handle_landing().
     """
     half_width = fighter_width_sub // 2
     min_x = half_width
@@ -50,6 +85,12 @@ def clamp_to_arena(fighter: FighterState, arena: ArenaState,
     elif fighter.x > max_x:
         fighter.x = max_x
         fighter.velocity_x = 0
+
+    # Ceiling clamp: can't go above top of arena
+    if fighter.y < 0:
+        fighter.y = 0
+        if fighter.velocity_y < 0:
+            fighter.velocity_y = 0
 
 
 def apply_knockback(fighter: FighterState, knockback_sub: int, direction: int) -> None:

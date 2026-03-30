@@ -40,6 +40,12 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "evaluate":     ("evaluate_ai.py",       "Run AI evaluation suite"),
     "check-regression": ("check_regression.py", "Check for AI regressions"),
     "create-baseline": ("create_baseline.py", "Create baseline artifact"),
+    "self-play":    ("run_self_play.py",      "Generate self-play training data"),
+    "train-promote": ("train_and_promote.py", "Retrain model and promote if gates pass"),
+    "model-status": ("model_status.py",       "Show model versions and training data stats"),
+    "curriculum":      ("train_with_curriculum.py", "Curriculum-driven training cycle"),
+    "session-status":  ("session_status.py",        "Show session adaptation state"),
+    "api":             ("run_api.py",                "Start local API server"),
 }
 
 

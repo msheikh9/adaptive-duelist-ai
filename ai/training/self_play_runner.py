@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ai.training.scripted_opponent import ScriptedOpponent, ScriptedProfile
 
 if TYPE_CHECKING:
+    from ai.training.curriculum import CurriculumPlan
     from config.config_loader import AIConfig, GameConfig
 
 log = logging.getLogger(__name__)
@@ -37,13 +38,19 @@ def run_self_play(
     game_cfg: "GameConfig",
     ai_cfg: "AIConfig",
     max_ticks: int = 5000,
+    curriculum: "CurriculumPlan | None" = None,
 ) -> SelfPlayResult:
     """Run N headless matches: T2 AI vs ScriptedOpponent.
 
     Profiles cycle: match i uses profiles[i % len(profiles)].
     Each match uses seed seed_start + i.
     Writes matches + semantic_events to db_path.
+
+    If curriculum is provided, profiles and match counts are derived from
+    the curriculum's match_allocation instead of the profiles/n_matches args.
     """
+    if curriculum is not None:
+        profiles, n_matches = _expand_curriculum(curriculum)
     from ai.layers.behavior_model import BehaviorModel
     from ai.layers.prediction_engine import PredictionEngine
     from ai.layers.tactical_planner import TacticalPlanner, AITier
@@ -189,11 +196,11 @@ def run_self_play(
                 sim.match_status = MatchStatus.ENDED
                 sim.winner = "PLAYER"
 
+        winner = sim.winner or "DRAW"
         planner.on_match_end()
-        bm.on_match_end()
+        bm.on_match_end(winner, sim.tick_id)
 
         # Update match row with outcome
-        winner = sim.winner or "DRAW"
         db.execute_safe(
             """UPDATE matches SET ended_at=datetime('now'), total_ticks=?,
                winner=?, player_hp_final=?, ai_hp_final=?
@@ -213,3 +220,37 @@ def run_self_play(
 
     db.close()
     return result
+
+
+def _expand_curriculum(curriculum: "CurriculumPlan") -> tuple[list[ScriptedProfile], int]:
+    """Convert a CurriculumPlan into an ordered (profiles_list, total) for cycling.
+
+    Each profile appears in the list proportional to its allocation.
+    The list is sorted by profile value for determinism, then interleaved
+    so profile order cycles evenly across matches.
+    """
+    # Build expanded list: interleave profiles proportionally
+    # e.g. {AGGRESSIVE: 3, PATTERNED: 2} → [AGG, PAT, AGG, PAT, AGG]
+    allocation = curriculum.match_allocation
+    total = sum(allocation.values())
+
+    # Sort profiles by name for determinism
+    sorted_profiles = sorted(curriculum.profiles, key=lambda p: p.value)
+
+    expanded: list[ScriptedProfile] = []
+    counters = {p: allocation.get(p.value, 0) for p in sorted_profiles}
+
+    for _ in range(total):
+        # Pick profile with most remaining allocation (ties broken by name)
+        chosen = max(
+            sorted_profiles,
+            key=lambda p: (counters[p], p.value),
+        )
+        expanded.append(chosen)
+        counters[chosen] -= 1
+        # Remove exhausted profiles to keep choice fair
+        sorted_profiles = [p for p in sorted_profiles if counters[p] > 0]
+        if not sorted_profiles:
+            break
+
+    return expanded, len(expanded)

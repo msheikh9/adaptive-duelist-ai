@@ -69,6 +69,8 @@ class FighterState:
     x: int = 0
     y: int = 0
     velocity_x: int = 0
+    # Phase 15: vertical velocity (sub-pixel/tick; negative = upward)
+    velocity_y: int = 0
 
     # Resources
     hp: int = 200
@@ -85,6 +87,9 @@ class FighterState:
     # Facing direction: +1 = facing right, -1 = facing left
     facing: int = 1
 
+    # Phase 17: dodge cooldown counter (ticks until next dodge is legal; 0 = ready)
+    dodge_cooldown: int = 0
+
     @property
     def is_free(self) -> bool:
         return self.fsm_state in (FSMState.IDLE, FSMState.MOVING)
@@ -96,6 +101,11 @@ class FighterState:
     @property
     def is_alive(self) -> bool:
         return self.fsm_state != FSMState.KO
+
+    @property
+    def is_airborne(self) -> bool:
+        """True while fighter is off the ground (jump startup, in air, landing)."""
+        return self.fsm_state in (FSMState.JUMP_STARTUP, FSMState.AIRBORNE, FSMState.LANDING)
 
 
 @dataclass

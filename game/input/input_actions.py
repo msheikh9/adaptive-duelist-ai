@@ -21,3 +21,5 @@ class InputAction(Enum):
     PRESS_DODGE = auto()
     PRESS_BLOCK = auto()
     RELEASE_BLOCK = auto()
+    # Phase 15: jump
+    PRESS_JUMP = auto()

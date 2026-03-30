@@ -5,26 +5,34 @@ window:
   fps_cap: 60
 
 colors:
-  background: [30, 30, 40]
-  arena_floor: [60, 60, 70]
+  background: [22, 24, 34]
+  arena_floor: [55, 58, 72]
   player: [80, 160, 255]
   ai: [255, 80, 80]
-  hp_bar_fill: [50, 200, 80]
-  hp_bar_empty: [80, 30, 30]
-  stamina_bar_fill: [220, 180, 40]
-  stamina_bar_empty: [60, 50, 20]
+  hp_bar_fill: [50, 210, 90]
+  hp_bar_empty: [70, 28, 28]
+  stamina_bar_fill: [220, 185, 45]
+  stamina_bar_empty: [55, 45, 18]
   text_primary: [240, 240, 240]
-  text_secondary: [160, 160, 170]
+  text_secondary: [150, 155, 170]
   hud_background: [20, 20, 30, 200]
+  accent: [160, 120, 240]
+  hit_flash: [255, 255, 255]
+  health_critical: [255, 120, 30]
+  stamina_low: [255, 140, 30]
+  panel_bg: [18, 18, 28]
+  tier_badge: [80, 200, 140]
+  border: [60, 65, 90]
 
 hud:
-  hp_bar_width: 300
-  hp_bar_height: 20
-  stamina_bar_width: 300
-  stamina_bar_height: 12
+  hp_bar_width: 320
+  hp_bar_height: 24
+  stamina_bar_width: 320
+  stamina_bar_height: 13
   ai_panel_width: 320
   ai_panel_height: 160
   ai_panel_x: 940
   ai_panel_y: 20
   font_size_primary: 18
   font_size_secondary: 14
+  font_size_large: 32

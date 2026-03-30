@@ -23,6 +23,10 @@ def can_commit(fighter: FighterState, commitment: CombatCommitment,
     if fighter.fsm_state == FSMState.KO:
         return False
 
+    # Phase 17: dodge cooldown — cannot dodge while cooldown is active
+    if commitment == CombatCommitment.DODGE_BACKWARD and fighter.dodge_cooldown > 0:
+        return False
+
     # Check stamina requirements
     stamina_cost = get_stamina_cost(commitment, config)
     if stamina_cost is not None and fighter.stamina < stamina_cost:
@@ -42,6 +46,8 @@ def get_stamina_cost(commitment: CombatCommitment, config: GameConfig) -> int | 
             return config.actions.dodge_backward.stamina_cost
         case CombatCommitment.MOVE_LEFT | CombatCommitment.MOVE_RIGHT:
             return None  # continuous cost, checked per-tick in stamina system
+        case CombatCommitment.JUMP:
+            return None  # no stamina cost for jumping
         case _:
             return None
 
@@ -66,6 +72,8 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.DODGE_STARTUP
             fighter.fsm_frames_remaining = config.actions.dodge_backward.startup_frames
             fighter.stamina -= config.actions.dodge_backward.stamina_cost
+            # Phase 17: start the inter-dodge cooldown immediately on commitment
+            fighter.dodge_cooldown = config.actions.dodge_backward.cooldown_frames
 
         case CombatCommitment.MOVE_LEFT:
             fighter.fsm_state = FSMState.MOVING
@@ -76,6 +84,11 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.MOVING
             fighter.fsm_frames_remaining = 0
             fighter.velocity_x = config.fighter.move_speed * config.simulation.sub_pixel_scale
+
+        case CombatCommitment.JUMP:
+            fighter.fsm_state = FSMState.JUMP_STARTUP
+            fighter.fsm_frames_remaining = config.fighter.jump_startup_frames
+            # velocity_y is set on JUMP_STARTUP → AIRBORNE transition in tick_fsm
 
 
 def stop_moving(fighter: FighterState) -> None:
@@ -112,6 +125,24 @@ def enter_ko(fighter: FighterState) -> None:
     fighter.hp = 0
 
 
+def enter_landing(fighter: FighterState, recovery_frames: int) -> None:
+    """Fighter touches down after being airborne. Brief landing recovery."""
+    fighter.fsm_state = FSMState.LANDING
+    fighter.fsm_frames_remaining = recovery_frames
+    fighter.velocity_y = 0
+    fighter.active_commitment = None
+
+
+def tick_dodge_cooldown(fighter: FighterState) -> None:
+    """Decrement the inter-dodge cooldown by one tick.
+
+    Called every SIMULATE tick regardless of FSM state so the cooldown
+    counts down even while the fighter is locked in other animations.
+    """
+    if fighter.dodge_cooldown > 0:
+        fighter.dodge_cooldown -= 1
+
+
 def _get_attack_config(commitment: CombatCommitment, config: GameConfig):
     """Get the AttackActionConfig for an attack commitment."""
     if commitment == CombatCommitment.LIGHT_ATTACK:
@@ -130,7 +161,7 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
     """
     state = fighter.fsm_state
 
-    if state in (FSMState.IDLE, FSMState.MOVING, FSMState.KO):
+    if state in (FSMState.IDLE, FSMState.MOVING, FSMState.KO, FSMState.AIRBORNE):
         return
 
     if fighter.fsm_frames_remaining > 0:
@@ -175,5 +206,15 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
             fighter.velocity_x = 0
 
         case FSMState.EXHAUSTED:
+            fighter.fsm_state = FSMState.IDLE
+            fighter.fsm_frames_remaining = 0
+
+        case FSMState.JUMP_STARTUP:
+            # Launch the fighter into the air
+            fighter.fsm_state = FSMState.AIRBORNE
+            fighter.velocity_y = -(config.fighter.jump_velocity * config.simulation.sub_pixel_scale)
+            fighter.fsm_frames_remaining = 0
+
+        case FSMState.LANDING:
             fighter.fsm_state = FSMState.IDLE
             fighter.fsm_frames_remaining = 0

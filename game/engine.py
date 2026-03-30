@@ -5,6 +5,18 @@ phases: INPUT → SIMULATE → AI_OBSERVE → LOG → RENDER.
 
 The engine delegates all logic to subsystems. It orchestrates but
 owns no gameplay logic itself.
+
+Phase 13 additions:
+  - _run_title_screen()  — pre-match help/controls screen shown at startup
+  - _show_help flag      — pause simulation and show controls overlay (H key)
+  - hit-flash counters   — brief white flash when a fighter is hit
+
+Phase 15 additions:
+  - Hitstop              — freeze simulation N frames on hit (purely display)
+  - Screen shake         — brief camera shake on hit
+  - Impact VFX           — particle spawn notifications to renderer
+  - Sound hooks          — NullSoundManager wired at all combat events
+  - Gravity / landing    — apply_gravity + handle_landing in simulate loop
 """
 
 from __future__ import annotations
@@ -25,19 +37,24 @@ from data.tick_snapshot import TickSnapshot
 from game.arena import classify_spacing
 from game.clock import GameClock
 from game.combat.actions import Actor, CombatCommitment, FSMState, FREE_STATES
-from game.combat.collision import HitTracker, check_hit
+from game.combat.collision import HitTracker, check_hit, was_dodge_avoided
 from game.combat.damage import apply_hit
 from game.combat.physics import (
     apply_dodge_velocity,
+    apply_gravity,
     apply_velocity,
     clamp_to_arena,
+    handle_landing,
     update_facing,
 )
 from game.combat.stamina import tick_stamina
-from game.combat.state_machine import tick_fsm, stop_moving
+from game.combat.state_machine import (
+    enter_landing, tick_fsm, stop_moving, tick_dodge_cooldown,
+)
 from game.entities.ai_fighter import BaselineAIController
 from game.entities.player_fighter import PlayerController
 from game.input.input_handler import InputHandler
+from game.sound import NullSoundManager
 from replay.recorder import ReplayRecorder
 from ai.layers.behavior_model import BehaviorModel
 from ai.layers.prediction_engine import PredictionEngine
@@ -53,6 +70,20 @@ from rendering.renderer import Renderer
 
 log = logging.getLogger(__name__)
 
+# Number of simulation ticks a hit-flash lasts (Phase 17: increased from 5 → 8)
+_HIT_FLASH_TICKS = 8
+
+# Phase 15/17: hitstop (display frames, not simulation ticks)
+# Phase 17: increased for clearer hit confirmation (light 4→6, heavy 8→12)
+_HITSTOP_LIGHT  = 6
+_HITSTOP_HEAVY  = 12
+
+# Phase 15/17: screen shake (Phase 17: stronger for hit clarity)
+_SHAKE_FRAMES_LIGHT    = 4
+_SHAKE_FRAMES_HEAVY    = 7
+_SHAKE_INTENSITY_LIGHT = 3   # pixels
+_SHAKE_INTENSITY_HEAVY = 6   # pixels
+
 
 class Engine:
     """Top-level game engine. Manages the main loop and match lifecycle."""
@@ -60,7 +91,7 @@ class Engine:
     def __init__(self, game_cfg: GameConfig, ai_cfg: AIConfig,
                  display_cfg: DisplayConfig, db: Database,
                  headless: bool = False,
-                 ai_tier: AITier = AITier.T0_BASELINE) -> None:
+                 ai_tier: AITier = AITier.T2_FULL_ADAPTIVE) -> None:
         self._gcfg = game_cfg
         self._ai_cfg = ai_cfg
         self._dcfg = display_cfg
@@ -83,6 +114,25 @@ class Engine:
         self._match_end_tick: int | None = None
         self._recorder: ReplayRecorder | None = None
 
+        # Phase 13: UX state
+        self._show_help = False
+        self._player_hit_flash: int = 0  # ticks remaining for player hit flash
+        self._ai_hit_flash: int = 0      # ticks remaining for AI hit flash
+
+        # Phase 15: combat juice state
+        self._hitstop_remaining: int = 0   # display frames to freeze on hit
+        self._shake_remaining: int = 0     # display frames of screen shake
+        self._shake_intensity: int = 0     # current shake magnitude (pixels)
+        # Pending VFX: (x_sub, y_sub, is_heavy, kind) — drained into renderer each frame
+        # kind: "light" | "heavy" | "dodge" | "whiff"
+        self._pending_hit_vfx: list[tuple[int, int, bool, str]] = []
+        # Phase 17: attacker whiff flash (ticks remaining)
+        self._player_whiff_flash: int = 0
+        self._ai_whiff_flash: int = 0
+
+        # Phase 15: sound hooks
+        self._sound = NullSoundManager()
+
         # Track last commitment ticks for reaction time calculation
         self._last_player_commit_tick = 0
         self._last_ai_commit_tick = 0
@@ -98,7 +148,10 @@ class Engine:
         # Prediction engine (ensemble: Markov + sklearn)
         self._prediction_engine = PredictionEngine(
             db, self._behavior_model, ai_cfg, game_cfg)
-        self._prediction_engine.try_load_sklearn()
+        # Always attempt to load the active promoted model from the registry
+        # (force=True bypasses the match-count gate so the trained model is
+        # used from the very first match in live play).
+        self._prediction_engine.try_load_sklearn(force=True)
 
         # Tactical planner (T1/T2 tiers use this instead of baseline AI)
         self._tactical_planner: TacticalPlanner | None = None
@@ -111,8 +164,19 @@ class Engine:
         pygame.init()
 
         if not self._headless:
-            self._renderer = Renderer(self._gcfg, self._dcfg)
+            self._renderer = Renderer(self._gcfg, self._dcfg,
+                                      ai_tier_name=self._ai_tier.name)
             self._renderer.init()
+
+            # Show title / tier-selection / controls screen before the first match.
+            # Returns the chosen tier, or None if the player quit.
+            chosen_tier = self._run_title_screen()
+            if chosen_tier is None:
+                pygame.quit()
+                return
+
+            # Apply the tier chosen on the title screen (may differ from default)
+            self._apply_tier(chosen_tier)
 
         self._start_match()
         self._clock.start()
@@ -127,22 +191,141 @@ class Engine:
         finally:
             pygame.quit()
 
+    # ------------------------------------------------------------------
+    # Title screen (pre-match)
+    # ------------------------------------------------------------------
+
+    def _run_title_screen(self) -> "AITier | None":
+        """Show the title / tier-selection / controls screen.
+
+        Returns the selected AITier when the player starts the match,
+        or None if they pressed ESC or quit.
+        """
+        if self._headless or self._renderer is None:
+            return self._ai_tier
+
+        _TIERS = (AITier.T2_FULL_ADAPTIVE, AITier.T1_MARKOV_ONLY, AITier.T0_BASELINE)
+        idx = 0  # default: T2
+
+        clock = pygame.time.Clock()
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        return _TIERS[idx]
+                    if event.key == pygame.K_ESCAPE:
+                        return None
+                    if event.key in (pygame.K_LEFT, pygame.K_UP):
+                        idx = (idx - 1) % len(_TIERS)
+                    if event.key in (pygame.K_RIGHT, pygame.K_DOWN):
+                        idx = (idx + 1) % len(_TIERS)
+
+            self._renderer.render_title(selected_tier=_TIERS[idx].name)
+            clock.tick(30)
+
+    def _apply_tier(self, tier: AITier) -> None:
+        """Switch the engine to the given AI tier.
+
+        Called once after title-screen tier selection, before _start_match().
+        Rebuilds the tactical planner if the tier has changed.
+        """
+        if tier == self._ai_tier:
+            return
+
+        self._ai_tier = tier
+
+        # Update renderer badge
+        if self._renderer is not None:
+            self._renderer._ai_tier_name = tier.name
+
+        # Rebuild tactical planner for the new tier
+        if tier in (AITier.T1_MARKOV_ONLY, AITier.T2_FULL_ADAPTIVE):
+            self._tactical_planner = TacticalPlanner(
+                self._db, self._prediction_engine, self._ai_cfg,
+                self._gcfg, tier,
+            )
+        else:
+            # T0: no planner
+            self._tactical_planner = None
+
+    # ------------------------------------------------------------------
+    # Frame + tick loops
+    # ------------------------------------------------------------------
+
     def _run_frame(self) -> None:
         """Run one frame: process clock, tick simulation, render."""
         ticks = self._clock.update()
 
+        # Phase 15: hitstop — freeze simulation for N display frames
+        if self._hitstop_remaining > 0:
+            self._hitstop_remaining -= 1
+            ticks = 0  # skip simulation this frame
+
         for _ in range(ticks):
             if not self._running:
                 break
-            self._run_tick()
+            if self._show_help:
+                # Simulation paused while help overlay is open
+                self._handle_help_input()
+            else:
+                self._run_tick()
 
-        # Render at display rate
+        # Drain pending VFX notifications into renderer
+        if self._renderer and self._pending_hit_vfx:
+            for entry in self._pending_hit_vfx:
+                x_sub, y_sub, is_heavy, kind = entry
+                self._renderer.spawn_hit_particles(x_sub, y_sub, is_heavy, kind=kind)
+            self._pending_hit_vfx.clear()
+
+        # Render at display rate (passes flash counters and help flag)
         if self._renderer and self._running:
+            sx, sy = self._compute_shake_offset()
             self._state.set_phase(TickPhase.RENDER)
-            self._renderer.render(self._state)
+            self._renderer.render(
+                self._state,
+                show_help=self._show_help,
+                player_flash=self._player_hit_flash,
+                ai_flash=self._ai_hit_flash,
+                player_whiff=self._player_whiff_flash,
+                ai_whiff=self._ai_whiff_flash,
+                player_dodge_cd=self._state.player.dodge_cooldown,
+                ai_dodge_cd=self._state.ai.dodge_cooldown,
+                shake_x=sx,
+                shake_y=sy,
+            )
+
+        # Decay counters at display rate
+        if self._player_hit_flash > 0:
+            self._player_hit_flash -= 1
+        if self._ai_hit_flash > 0:
+            self._ai_hit_flash -= 1
+        if self._shake_remaining > 0:
+            self._shake_remaining -= 1
 
         # Cap frame rate
         pygame.time.Clock().tick(self._dcfg.window.fps_cap)
+
+    def _compute_shake_offset(self) -> tuple[int, int]:
+        """Return (dx, dy) screen shake offset for this frame."""
+        if self._shake_remaining <= 0:
+            return 0, 0
+        intensity = self._shake_intensity
+        # Alternating left/right with slight vertical
+        phase = self._shake_remaining % 2
+        return (intensity if phase else -intensity), (1 if phase else -1)
+
+    def _handle_help_input(self) -> None:
+        """Poll events while the help overlay is shown (simulation paused)."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self._running = False
+                self._show_help = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_h, pygame.K_ESCAPE):
+                    # ESC while help open → close help (don't quit)
+                    self._show_help = False
 
     def _run_headless_tick(self) -> None:
         """Run a single tick without rendering. For testing."""
@@ -159,10 +342,15 @@ class Engine:
         # === PHASE 1: INPUT ===
         state.set_phase(TickPhase.INPUT)
         inputs = self._input_handler.poll()
+
         if self._input_handler.quit_requested:
             self._running = False
             self._end_match()
             return
+
+        # H key toggles help overlay (pauses simulation next frame)
+        if self._input_handler.toggle_help_requested:
+            self._show_help = not self._show_help
 
         # === PHASE 2: SIMULATE ===
         state.set_phase(TickPhase.SIMULATE)
@@ -197,6 +385,10 @@ class Engine:
             if self._recorder:
                 self._recorder.record_commitment(
                     state.tick_id, Actor.PLAYER, player_commitment)
+            if player_commitment == CombatCommitment.JUMP:
+                self._sound.play_jump()
+            elif player_commitment == CombatCommitment.DODGE_BACKWARD:
+                self._sound.play_dodge_start()
 
         # --- AI decision ---
         if self._tactical_planner is not None:
@@ -208,18 +400,42 @@ class Engine:
             if self._recorder:
                 self._recorder.record_commitment(
                     state.tick_id, Actor.AI, ai_commitment)
+            if ai_commitment == CombatCommitment.JUMP:
+                self._sound.play_jump()
+            elif ai_commitment == CombatCommitment.DODGE_BACKWARD:
+                self._sound.play_dodge_start()
+
+        # --- Phase 17: tick dodge cooldowns (every tick regardless of FSM state) ---
+        tick_dodge_cooldown(state.player)
+        tick_dodge_cooldown(state.ai)
+
+        # --- Phase 15: apply gravity (before velocity) ---
+        apply_gravity(state.player, state.arena, gcfg)
+        apply_gravity(state.ai, state.arena, gcfg)
 
         # --- Apply dodge velocity (must be before general velocity) ---
         apply_dodge_velocity(state.player, gcfg)
         apply_dodge_velocity(state.ai, gcfg)
 
-        # --- Apply velocity ---
+        # --- Apply velocity (x and y) ---
         apply_velocity(state.player)
         apply_velocity(state.ai)
 
-        # --- Clamp to arena ---
+        # --- Clamp to arena (x-axis + ceiling) ---
         clamp_to_arena(state.player, state.arena, fighter_w_sub)
         clamp_to_arena(state.ai, state.arena, fighter_w_sub)
+
+        # --- Phase 15: handle landing ---
+        player_landed = handle_landing(state.player, state.arena)
+        ai_landed = handle_landing(state.ai, state.arena)
+
+        if player_landed and state.player.fsm_state == FSMState.AIRBORNE:
+            enter_landing(state.player, gcfg.fighter.landing_recovery_frames)
+            self._sound.play_land()
+
+        if ai_landed and state.ai.fsm_state == FSMState.AIRBORNE:
+            enter_landing(state.ai, gcfg.fighter.landing_recovery_frames)
+            self._sound.play_land()
 
         # --- Update facing ---
         update_facing(state.player, state.ai)
@@ -232,13 +448,34 @@ class Engine:
             state.ai, state.player, "ai", self._hit_tracker, gcfg
         )
 
-        # --- Apply damage ---
+        # --- Phase 17: detect dodge-avoided hits (before damage, attacker still active) ---
+        player_dodge_avoided = was_dodge_avoided(
+            state.player, state.ai, "player", self._hit_tracker, gcfg
+        )
+        ai_dodge_avoided = was_dodge_avoided(
+            state.ai, state.player, "ai", self._hit_tracker, gcfg
+        )
+
+        # --- Apply damage + trigger hit flash + juice ---
         if player_hit:
             apply_hit(state.ai, player_hit)
+            self._ai_hit_flash = _HIT_FLASH_TICKS
             self._emit_hit_event(Actor.PLAYER, player_hit)
+            self._apply_hit_juice(player_hit, state.ai.x, state.ai.y)
+
         if ai_hit:
             apply_hit(state.player, ai_hit)
+            self._player_hit_flash = _HIT_FLASH_TICKS
             self._emit_hit_event(Actor.AI, ai_hit)
+            self._apply_hit_juice(ai_hit, state.player.x, state.player.y)
+
+        # --- Phase 17: dodge-avoided VFX / sound ---
+        if player_dodge_avoided:
+            self._sound.play_dodge_avoid()
+            self._pending_hit_vfx.append((state.ai.x, state.ai.y, False, "dodge"))
+        if ai_dodge_avoided:
+            self._sound.play_dodge_avoid()
+            self._pending_hit_vfx.append((state.player.x, state.player.y, False, "dodge"))
 
         # --- Stamina ---
         player_exhausted = tick_stamina(state.player, gcfg)
@@ -249,7 +486,6 @@ class Engine:
             self._emit_simple_event(EventType.STAMINA_EXHAUSTED, Actor.AI)
 
         # --- Advance FSMs ---
-        # Reset hit tracker when fighters return to free state
         if state.player.is_free:
             self._hit_tracker.reset("player")
         if state.ai.is_free:
@@ -258,6 +494,29 @@ class Engine:
         tick_fsm(state.player, gcfg)
         tick_fsm(state.ai, gcfg)
 
+        # --- Phase 17: whiff detection (ATTACK_ACTIVE → ATTACK_RECOVERY without hit) ---
+        if (self._prev_player_fsm == FSMState.ATTACK_ACTIVE
+                and state.player.fsm_state == FSMState.ATTACK_RECOVERY
+                and not self._hit_tracker.has_connected("player")):
+            self._sound.play_whiff()
+            self._player_whiff_flash = _HIT_FLASH_TICKS
+            self._pending_hit_vfx.append(
+                (state.player.x, state.player.y, False, "whiff"))
+
+        if (self._prev_ai_fsm == FSMState.ATTACK_ACTIVE
+                and state.ai.fsm_state == FSMState.ATTACK_RECOVERY
+                and not self._hit_tracker.has_connected("ai")):
+            self._sound.play_whiff()
+            self._ai_whiff_flash = _HIT_FLASH_TICKS
+            self._pending_hit_vfx.append(
+                (state.ai.x, state.ai.y, False, "whiff"))
+
+        # Decay whiff flash
+        if self._player_whiff_flash > 0:
+            self._player_whiff_flash -= 1
+        if self._ai_whiff_flash > 0:
+            self._ai_whiff_flash -= 1
+
         # --- Detect COMMITMENT_END transitions ---
         if (self._prev_player_fsm not in FREE_STATES
                 and state.player.fsm_state in FREE_STATES):
@@ -265,7 +524,6 @@ class Engine:
         if (self._prev_ai_fsm not in FREE_STATES
                 and state.ai.fsm_state in FREE_STATES):
             self._emit_simple_event(EventType.COMMITMENT_END, Actor.AI)
-            # Notify planner of AI commitment completion for outcome tracking
             if self._tactical_planner is not None:
                 self._tactical_planner.on_ai_commit_end(
                     state.tick_id, state.ai.hp, state.player.hp)
@@ -282,6 +540,33 @@ class Engine:
             state.winner = "PLAYER"
             self._end_match()
 
+    def _apply_hit_juice(self, hit, defender_x: int, defender_y: int) -> None:
+        """Set hitstop, screen shake, VFX, and sound for a confirmed hit."""
+        is_heavy = (hit.attacker_commitment == CombatCommitment.HEAVY_ATTACK)
+
+        # Hitstop (take the maximum in case of simultaneous hits)
+        frames = _HITSTOP_HEAVY if is_heavy else _HITSTOP_LIGHT
+        self._hitstop_remaining = max(self._hitstop_remaining, frames)
+
+        # Screen shake
+        if is_heavy:
+            self._shake_remaining  = _SHAKE_FRAMES_HEAVY
+            self._shake_intensity  = _SHAKE_INTENSITY_HEAVY
+        else:
+            self._shake_remaining  = max(self._shake_remaining,  _SHAKE_FRAMES_LIGHT)
+            self._shake_intensity  = max(self._shake_intensity,  _SHAKE_INTENSITY_LIGHT)
+
+        # VFX (sub-pixel coords; renderer converts to screen coords)
+        # kind: "heavy" | "light" distinguishes spark colour/count
+        kind = "heavy" if is_heavy else "light"
+        self._pending_hit_vfx.append((defender_x, defender_y, is_heavy, kind))
+
+        # Sound
+        if is_heavy:
+            self._sound.play_hit_heavy()
+        else:
+            self._sound.play_hit_light()
+
     def _start_match(self) -> None:
         """Initialize a new match."""
         gcfg = self._gcfg
@@ -294,7 +579,6 @@ class Engine:
         rng_seed = random.randint(0, 2**32 - 1)
         self._match_id = str(uuid.uuid4())
 
-        # Position fighters at 1/3 and 2/3 of arena width
         player_x = arena.width_sub // 3
         ai_x = (arena.width_sub * 2) // 3
 
@@ -325,10 +609,19 @@ class Engine:
         self._prev_ai_fsm = FSMState.IDLE
         self._match_end_tick = None
 
-        # Initialize replay recorder
+        # Reset all UX/juice state for the new match
+        self._player_hit_flash = 0
+        self._ai_hit_flash = 0
+        self._player_whiff_flash = 0
+        self._ai_whiff_flash = 0
+        self._show_help = False
+        self._hitstop_remaining = 0
+        self._shake_remaining = 0
+        self._shake_intensity = 0
+        self._pending_hit_vfx.clear()
+
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
-        # Record match in DB
         self._db.execute_safe(
             "INSERT INTO matches (match_id, session_id, started_at, rng_seed, config_hash) "
             "VALUES (?, ?, ?, ?, ?);",
@@ -338,18 +631,13 @@ class Engine:
              config_hash(CONFIG_DIR / "game_config.yaml")),
         )
 
-        # Behavior model: reset per-match state
         self._behavior_model.on_match_start(self._match_id)
-
-        # Prediction engine: reset per-match state
         self._prediction_engine.on_match_start(self._match_id)
 
-        # Tactical planner: reset per-match state
         if self._tactical_planner is not None:
             self._tactical_planner.on_match_start(
                 self._match_id, self._session_id, rng_seed)
 
-        # Emit match start event
         self._emit_simple_event(EventType.MATCH_START, Actor.PLAYER)
 
         log.info("Match started: %s (seed=%d)", self._match_id[:8], rng_seed)
@@ -363,7 +651,6 @@ class Engine:
         self._emit_simple_event(EventType.MATCH_END, Actor.PLAYER)
         self._game_logger.flush_all()
 
-        # Save replay file
         if self._recorder:
             snapshots = self._game_logger.drain_tick_buffer()
             replay_path = self._recorder.finalize(
@@ -371,7 +658,6 @@ class Engine:
             if replay_path:
                 log.info("Replay saved: %s", replay_path.name)
 
-        # Update match record
         self._db.execute_safe(
             "UPDATE matches SET ended_at=?, total_ticks=?, winner=?, "
             "player_hp_final=?, ai_hp_final=? WHERE match_id=?;",
@@ -383,13 +669,9 @@ class Engine:
              self._match_id),
         )
 
-        # Finalize behavior model: update metrics + persist profile
         self._behavior_model.on_match_end(self._state.winner, self._state.tick_id)
-
-        # Finalize prediction engine: check if sklearn should activate
         self._prediction_engine.on_match_end()
 
-        # Finalize tactical planner
         if self._tactical_planner is not None:
             self._tactical_planner.on_match_end()
 
@@ -407,10 +689,21 @@ class Engine:
                 elif event.key == pygame.K_r:
                     self._start_match()
                     self._clock.start()
+                elif event.key == pygame.K_h:
+                    self._show_help = not self._show_help
 
         if self._renderer:
             self._state.set_phase(TickPhase.RENDER)
-            self._renderer.render(self._state)
+            self._renderer.render(
+                self._state,
+                show_help=self._show_help,
+                player_flash=self._player_hit_flash,
+                ai_flash=self._ai_hit_flash,
+                player_whiff=self._player_whiff_flash,
+                ai_whiff=self._ai_whiff_flash,
+                player_dodge_cd=self._state.player.dodge_cooldown,
+                ai_dodge_cd=self._state.ai.dodge_cooldown,
+            )
             pygame.time.Clock().tick(30)
 
     # --- Event emission helpers ---
@@ -455,7 +748,6 @@ class Engine:
         self._behavior_model.on_event(event)
         self._prediction_engine.on_event(event)
 
-        # Feed player commits to planner for prediction accuracy tracking
         if (actor == Actor.PLAYER
                 and self._tactical_planner is not None
                 and commitment is not None):

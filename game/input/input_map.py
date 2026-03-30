@@ -20,6 +20,9 @@ KEYDOWN_MAP: dict[int, InputAction] = {
     pygame.K_SPACE: InputAction.PRESS_DODGE,
     pygame.K_l: InputAction.PRESS_BLOCK,
     pygame.K_c: InputAction.PRESS_BLOCK,
+    # Phase 15: jump
+    pygame.K_w: InputAction.PRESS_JUMP,
+    pygame.K_UP: InputAction.PRESS_JUMP,
 }
 
 # KEYUP events:

@@ -38,6 +38,11 @@ class FighterConfig:
     stamina_regen_attacking: float = 0.0
     exhaustion_recovery_frames: int = 30
     move_speed: int = 5
+    # Phase 15: jump / verticality
+    jump_velocity: int = 15        # pixels/tick upward launch speed
+    jump_gravity: int = 1          # pixels/tick² downward acceleration
+    jump_startup_frames: int = 3   # frames before leaving ground
+    landing_recovery_frames: int = 5  # frames on landing before IDLE
 
 
 @dataclass(frozen=True)
@@ -64,11 +69,13 @@ class AttackActionConfig:
 
 @dataclass(frozen=True)
 class DodgeActionConfig:
-    startup_frames: int = 2
-    active_frames: int = 6
-    recovery_frames: int = 8
-    stamina_cost: int = 20
-    distance: int = 150
+    startup_frames: int = 3
+    active_frames: int = 5
+    recovery_frames: int = 12
+    stamina_cost: int = 25
+    distance: int = 130
+    # Phase 17: inter-dodge cooldown (ticks from dodge start until next dodge is legal)
+    cooldown_frames: int = 45
 
     @property
     def total_frames(self) -> int:
@@ -171,6 +178,9 @@ class ScoringWeights:
     accuracy_trend: float = 0.4
     shift_response: float = 0.7
     mode_success_rate: float = 0.6
+    # Phase 11: session-level adaptation factors
+    session_success_rate: float = 0.25
+    archetype_alignment: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -210,6 +220,16 @@ class ProfileConfig:
 
 
 @dataclass(frozen=True)
+class SessionAdaptationConfig:
+    """Configuration for cross-match in-session behavioral adaptation."""
+    decay_factor: float = 0.8             # per-match recency decay on session memory
+    min_matches_for_archetype: int = 2    # classify archetype only after this many matches
+    archetype_alignment_weight: float = 0.25
+    session_success_weight: float = 0.25
+    min_session_samples: int = 5          # min weighted samples before session success activates
+
+
+@dataclass(frozen=True)
 class AIConfig:
     prediction: PredictionConfig = field(default_factory=PredictionConfig)
     ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
@@ -219,6 +239,12 @@ class AIConfig:
     action_resolver: ActionResolverConfig = field(default_factory=ActionResolverConfig)
     reaction: ReactionConfig = field(default_factory=ReactionConfig)
     profile: ProfileConfig = field(default_factory=ProfileConfig)
+    session_adaptation: SessionAdaptationConfig = field(
+        default_factory=SessionAdaptationConfig
+    )
+    # Alignment bonus table: {mode_name: {archetype_name: float}}
+    # Passed through as raw dict; defaults to empty (no alignment bonuses).
+    archetype_mode_alignment: dict = field(default_factory=dict)
 
 
 # --- Display Config ---
@@ -245,6 +271,14 @@ class ColorScheme:
     text_primary: tuple[int, int, int] = (240, 240, 240)
     text_secondary: tuple[int, int, int] = (160, 160, 170)
     hud_background: tuple[int, int, int, int] = (20, 20, 30, 200)
+    # Phase 13: UX polish additions
+    accent: tuple[int, int, int] = (160, 120, 240)
+    hit_flash: tuple[int, int, int] = (255, 255, 255)
+    health_critical: tuple[int, int, int] = (255, 120, 30)
+    stamina_low: tuple[int, int, int] = (255, 140, 30)
+    panel_bg: tuple[int, int, int] = (18, 18, 28)
+    tier_badge: tuple[int, int, int] = (80, 200, 140)
+    border: tuple[int, int, int] = (60, 65, 90)
 
 
 @dataclass(frozen=True)
@@ -259,6 +293,8 @@ class HUDConfig:
     ai_panel_y: int = 20
     font_size_primary: int = 18
     font_size_secondary: int = 14
+    # Phase 13: UX polish additions
+    font_size_large: int = 32
 
 
 @dataclass(frozen=True)
@@ -466,6 +502,14 @@ def _validate_ai_config(cfg: AIConfig) -> None:
     # Profile
     _validate_positive(cfg.profile.recency_weight_multiplier, "profile.recency_weight_multiplier")
     _validate_positive(cfg.profile.rolling_window_size, "profile.rolling_window_size")
+
+    # Session adaptation
+    sa = cfg.session_adaptation
+    _validate_fraction(sa.decay_factor, "session_adaptation.decay_factor")
+    _validate_positive(sa.min_matches_for_archetype, "session_adaptation.min_matches_for_archetype")
+    _validate_non_negative(sa.archetype_alignment_weight, "session_adaptation.archetype_alignment_weight")
+    _validate_non_negative(sa.session_success_weight, "session_adaptation.session_success_weight")
+    _validate_positive(sa.min_session_samples, "session_adaptation.min_session_samples")
 
 
 def _validate_display_config(cfg: DisplayConfig) -> None:

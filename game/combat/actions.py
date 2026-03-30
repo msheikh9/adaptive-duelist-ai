@@ -25,6 +25,8 @@ class CombatCommitment(Enum):
     # Phase 3: block
     BLOCK_START = 20
     BLOCK_RELEASE = 21
+    # Phase 15: jump
+    JUMP = 30
 
 
 # The subset of commitments active in Phase 1.
@@ -53,6 +55,10 @@ class FSMState(Enum):
     PARRY_STUNNED = auto()
     EXHAUSTED = auto()
     KO = auto()
+    # Phase 15: jump states (ordinals 15–17, fit in uint8 for replay packing)
+    JUMP_STARTUP = auto()
+    AIRBORNE = auto()
+    LANDING = auto()
 
 
 # States where the fighter can accept a new commitment.

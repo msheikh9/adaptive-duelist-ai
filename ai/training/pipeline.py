@@ -261,3 +261,66 @@ class TrainingPipeline:
                 promotion_reason="regression_detected",
                 regression_report=report,
             )
+
+    def run_curriculum_cycle(
+        self,
+        n_matches: int = 50,
+        auto_promote: bool = False,
+        seed_start: int = 0,
+        max_ticks: int = 5000,
+    ) -> PipelineResult:
+        """Full curriculum cycle:
+        1. Evaluate current model.
+        2. Analyze weaknesses.
+        3. Build curriculum.
+        4. Run self-play using the curriculum.
+        5. Retrain.
+        6. Evaluate candidate.
+        7. Check regression (if baseline set).
+        8. Promote if allowed.
+
+        Reuses run_self_play(), run_retrain(), evaluate_candidate(), and
+        check_regression() from the existing pipeline.
+        """
+        from ai.layers.tactical_planner import AITier
+        from ai.training.curriculum import build_curriculum
+        from ai.training.self_play_runner import run_self_play
+        from evaluation.match_runner import run_evaluation
+        from evaluation.weakness_analyzer import analyze_weaknesses
+
+        # Step 1: Evaluate current model to find weaknesses
+        current_eval = run_evaluation(
+            n_matches=max(5, n_matches // 10),
+            seed_start=seed_start,
+            tier=AITier.T2_FULL_ADAPTIVE,
+            max_ticks=max_ticks,
+            game_cfg=self._game_cfg,
+            ai_cfg=self._ai_cfg,
+        )
+
+        # Step 2 & 3: Analyze weaknesses and build curriculum
+        db = self._open_db()
+        try:
+            weakness = analyze_weaknesses(db, current_eval)
+        finally:
+            db.close()
+
+        curriculum = build_curriculum(weakness, n_matches)
+
+        # Step 4: Run self-play using curriculum
+        run_self_play(
+            n_matches=n_matches,
+            profiles=curriculum.profiles,
+            seed_start=seed_start,
+            db_path=self._db_path,
+            game_cfg=self._game_cfg,
+            ai_cfg=self._ai_cfg,
+            max_ticks=max_ticks,
+            curriculum=curriculum,
+        )
+
+        # Step 5–8: Run standard pipeline (retrain → eval → promote)
+        return self.run_pipeline(
+            auto_promote=auto_promote,
+            source_filter=None,
+        )
