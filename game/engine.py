@@ -84,6 +84,9 @@ _SHAKE_FRAMES_HEAVY    = 7
 _SHAKE_INTENSITY_LIGHT = 3   # pixels
 _SHAKE_INTENSITY_HEAVY = 6   # pixels
 
+# Phase 16: combo counter emphasis animation (display frames)
+_COMBO_FLASH_FRAMES = 15
+
 
 class Engine:
     """Top-level game engine. Manages the main loop and match lifecycle."""
@@ -123,12 +126,20 @@ class Engine:
         self._hitstop_remaining: int = 0   # display frames to freeze on hit
         self._shake_remaining: int = 0     # display frames of screen shake
         self._shake_intensity: int = 0     # current shake magnitude (pixels)
+        self._shake_max_frames: int = 0    # Phase 16: initial frame count for exponential decay
         # Pending VFX: (x_sub, y_sub, is_heavy, kind) — drained into renderer each frame
-        # kind: "light" | "heavy" | "dodge" | "whiff"
+        # kind: "light" | "heavy" | "dodge" | "whiff" | "land"
         self._pending_hit_vfx: list[tuple[int, int, bool, str]] = []
         # Phase 17: attacker whiff flash (ticks remaining)
         self._player_whiff_flash: int = 0
         self._ai_whiff_flash: int = 0
+
+        # Phase 16: combo streak counters (consecutive hits without opponent recovering)
+        self._player_combo: int = 0
+        self._ai_combo: int = 0
+        # Display frames remaining for combo emphasis animation
+        self._player_combo_flash: int = 0
+        self._ai_combo_flash: int = 0
 
         # Phase 15: sound hooks
         self._sound = NullSoundManager()
@@ -308,11 +319,19 @@ class Engine:
         pygame.time.Clock().tick(self._dcfg.window.fps_cap)
 
     def _compute_shake_offset(self) -> tuple[int, int]:
-        """Return (dx, dy) screen shake offset for this frame."""
+        """Return (dx, dy) screen shake offset for this frame.
+
+        Phase 16: exponential decay — intensity falls off as shake_remaining
+        approaches zero, using a power curve (** 1.5) for a punchy start that
+        smoothly fades rather than cutting off abruptly.
+        """
         if self._shake_remaining <= 0:
             return 0, 0
-        intensity = self._shake_intensity
-        # Alternating left/right with slight vertical
+        # Use max(remaining, max_frames) so frac ≤ 1 even if max_frames was never
+        # set (e.g. direct attribute mutation in tests).
+        max_f = max(1, self._shake_max_frames, self._shake_remaining)
+        frac = (self._shake_remaining / max_f) ** 1.5
+        intensity = max(1, round(self._shake_intensity * frac))
         phase = self._shake_remaining % 2
         return (intensity if phase else -intensity), (1 if phase else -1)
 
@@ -432,10 +451,14 @@ class Engine:
         if player_landed and state.player.fsm_state == FSMState.AIRBORNE:
             enter_landing(state.player, gcfg.fighter.landing_recovery_frames)
             self._sound.play_land()
+            # Phase 16: landing dust
+            self._pending_hit_vfx.append((state.player.x, state.player.y, False, "land"))
 
         if ai_landed and state.ai.fsm_state == FSMState.AIRBORNE:
             enter_landing(state.ai, gcfg.fighter.landing_recovery_frames)
             self._sound.play_land()
+            # Phase 16: landing dust
+            self._pending_hit_vfx.append((state.ai.x, state.ai.y, False, "land"))
 
         # --- Update facing ---
         update_facing(state.player, state.ai)
@@ -462,12 +485,18 @@ class Engine:
             self._ai_hit_flash = _HIT_FLASH_TICKS
             self._emit_hit_event(Actor.PLAYER, player_hit)
             self._apply_hit_juice(player_hit, state.ai.x, state.ai.y)
+            # Phase 16: increment player combo streak
+            self._player_combo += 1
+            self._player_combo_flash = _COMBO_FLASH_FRAMES
 
         if ai_hit:
             apply_hit(state.player, ai_hit)
             self._player_hit_flash = _HIT_FLASH_TICKS
             self._emit_hit_event(Actor.AI, ai_hit)
             self._apply_hit_juice(ai_hit, state.player.x, state.player.y)
+            # Phase 16: increment AI combo streak
+            self._ai_combo += 1
+            self._ai_combo_flash = _COMBO_FLASH_FRAMES
 
         # --- Phase 17: dodge-avoided VFX / sound ---
         if player_dodge_avoided:
@@ -502,6 +531,7 @@ class Engine:
             self._player_whiff_flash = _HIT_FLASH_TICKS
             self._pending_hit_vfx.append(
                 (state.player.x, state.player.y, False, "whiff"))
+            self._player_combo = 0  # Phase 16: whiff breaks combo
 
         if (self._prev_ai_fsm == FSMState.ATTACK_ACTIVE
                 and state.ai.fsm_state == FSMState.ATTACK_RECOVERY
@@ -510,6 +540,7 @@ class Engine:
             self._ai_whiff_flash = _HIT_FLASH_TICKS
             self._pending_hit_vfx.append(
                 (state.ai.x, state.ai.y, False, "whiff"))
+            self._ai_combo = 0  # Phase 16: whiff breaks combo
 
         # Decay whiff flash
         if self._player_whiff_flash > 0:
@@ -548,12 +579,16 @@ class Engine:
         frames = _HITSTOP_HEAVY if is_heavy else _HITSTOP_LIGHT
         self._hitstop_remaining = max(self._hitstop_remaining, frames)
 
-        # Screen shake
+        # Screen shake (Phase 16: track max_frames for exponential decay)
         if is_heavy:
             self._shake_remaining  = _SHAKE_FRAMES_HEAVY
+            self._shake_max_frames = _SHAKE_FRAMES_HEAVY
             self._shake_intensity  = _SHAKE_INTENSITY_HEAVY
         else:
-            self._shake_remaining  = max(self._shake_remaining,  _SHAKE_FRAMES_LIGHT)
+            new_frames = max(self._shake_remaining, _SHAKE_FRAMES_LIGHT)
+            if new_frames > self._shake_remaining:
+                self._shake_max_frames = _SHAKE_FRAMES_LIGHT
+            self._shake_remaining  = new_frames
             self._shake_intensity  = max(self._shake_intensity,  _SHAKE_INTENSITY_LIGHT)
 
         # VFX (sub-pixel coords; renderer converts to screen coords)
@@ -618,7 +653,13 @@ class Engine:
         self._hitstop_remaining = 0
         self._shake_remaining = 0
         self._shake_intensity = 0
+        self._shake_max_frames = 0
         self._pending_hit_vfx.clear()
+        # Phase 16: reset combo counters
+        self._player_combo = 0
+        self._ai_combo = 0
+        self._player_combo_flash = 0
+        self._ai_combo_flash = 0
 
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
