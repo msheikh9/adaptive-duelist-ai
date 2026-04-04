@@ -62,10 +62,23 @@ class _Particle:
 
 @dataclass
 class _FloatText:
-    """Floating damage number (renderer-side, purely cosmetic)."""
+    """Floating damage number or popup text (renderer-side, purely cosmetic)."""
     x: float
     y: float
     text: str
+    lifetime: int
+    max_lifetime: int
+    color: tuple[int, int, int]
+    large: bool = False   # Phase 19: use _font (18px) instead of _tiny_font (11px)
+
+
+@dataclass
+class _Ring:
+    """Expanding impact ring (renderer-side, purely cosmetic)."""
+    x: float
+    y: float
+    radius: float
+    max_radius: float
     lifetime: int
     max_lifetime: int
     color: tuple[int, int, int]
@@ -98,6 +111,14 @@ class Renderer:
 
         # Phase 17: floating damage text
         self._float_texts: list[_FloatText] = []
+
+        # Phase 19: impact rings (heavy hits / guard breaks)
+        self._rings: list[_Ring] = []
+
+        # Phase 19: attack trails — list of (screen_x, screen_y, age_frames)
+        # Separate trail per fighter; updated each render call.
+        self._player_trail: list[tuple[float, float, int]] = []
+        self._ai_trail:     list[tuple[float, float, int]] = []
 
     def init(self) -> pygame.Surface:
         pygame.display.set_caption(self._dcfg.window.title)

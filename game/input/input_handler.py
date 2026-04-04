@@ -22,6 +22,7 @@ class InputHandler:
     def __init__(self) -> None:
         self._quit_requested = False
         self._toggle_help_requested = False
+        self._toggle_hitbox_requested = False   # Phase 19: F1 debug overlay
 
     @property
     def quit_requested(self) -> bool:
@@ -32,14 +33,21 @@ class InputHandler:
         """True when the player pressed H this tick (request to open/close help)."""
         return self._toggle_help_requested
 
+    @property
+    def toggle_hitbox_requested(self) -> bool:
+        """True when the player pressed F1 this tick (toggle hitbox debug overlay)."""
+        return self._toggle_hitbox_requested
+
     def poll(self) -> list[InputAction]:
         """Read all pending pygame events and return InputActions.
 
         Must be called once per tick during the INPUT phase.
-        Side-effects: updates quit_requested and toggle_help_requested.
+        Side-effects: updates quit_requested, toggle_help_requested, and
+        toggle_hitbox_requested.
         """
         self._quit_requested = False
         self._toggle_help_requested = False
+        self._toggle_hitbox_requested = False
         actions: list[InputAction] = []
 
         for event in pygame.event.get():
@@ -53,6 +61,9 @@ class InputHandler:
                     continue
                 if event.key == pygame.K_h:
                     self._toggle_help_requested = True
+                    continue
+                if event.key == pygame.K_F1:
+                    self._toggle_hitbox_requested = True
                     continue
                 mapped = KEYDOWN_MAP.get(event.key)
                 if mapped is not None:

@@ -158,6 +158,13 @@ class Engine:
         self._player_guard_break_flash: int = 0  # player's guard was broken
         self._ai_guard_break_flash: int = 0      # AI's guard was broken
 
+        # Phase 19: debug hitbox overlay toggle
+        self._show_hitboxes: bool = False
+
+        # Phase 19: pending text popups — (text, x_sub, y_sub, is_large)
+        # Drained into renderer.spawn_text_popup() each display frame.
+        self._pending_popups: list[tuple[str, int, int, bool]] = []
+
         # Phase 15: sound hooks
         self._sound = NullSoundManager()
 
@@ -307,6 +314,12 @@ class Engine:
                 self._renderer.spawn_hit_particles(x_sub, y_sub, is_heavy, kind=kind)
             self._pending_hit_vfx.clear()
 
+        # Phase 19: drain pending text popups
+        if self._renderer and self._pending_popups:
+            for text, x_sub, y_sub, is_large in self._pending_popups:
+                self._renderer.spawn_text_popup(text, x_sub, y_sub, is_large)
+            self._pending_popups.clear()
+
         # Render at display rate (passes flash counters and help flag)
         if self._renderer and self._running:
             sx, sy = self._compute_shake_offset()
@@ -334,6 +347,7 @@ class Engine:
                 ai_block_flash=self._ai_block_flash,
                 player_guard_break_flash=self._player_guard_break_flash,
                 ai_guard_break_flash=self._ai_guard_break_flash,
+                show_hitboxes=self._show_hitboxes,
             )
 
         # Decay counters at display rate
@@ -411,6 +425,10 @@ class Engine:
         # H key toggles help overlay (pauses simulation next frame)
         if self._input_handler.toggle_help_requested:
             self._show_help = not self._show_help
+
+        # F1 key toggles hitbox debug overlay
+        if self._input_handler.toggle_hitbox_requested:
+            self._show_hitboxes = not self._show_hitboxes
 
         # === PHASE 2: SIMULATE ===
         state.set_phase(TickPhase.SIMULATE)
@@ -540,6 +558,9 @@ class Engine:
                 self._sound.play_guard_break()
                 self._pending_hit_vfx.append(
                     (state.ai.x, state.ai.y, True, "guard_break"))
+                # Phase 19: guard break text popup
+                self._pending_popups.append(
+                    ("GUARD BREAK!", state.ai.x, state.ai.y, True))
             else:
                 self._sound.play_block()
                 self._pending_hit_vfx.append(
@@ -555,6 +576,9 @@ class Engine:
                 self._sound.play_guard_break()
                 self._pending_hit_vfx.append(
                     (state.player.x, state.player.y, True, "guard_break"))
+                # Phase 19: guard break text popup
+                self._pending_popups.append(
+                    ("GUARD BREAK!", state.player.x, state.player.y, True))
             else:
                 self._sound.play_block()
                 self._pending_hit_vfx.append(
@@ -569,6 +593,10 @@ class Engine:
             # Phase 16: increment player combo streak
             self._player_combo += 1
             self._player_combo_flash = _COMBO_FLASH_FRAMES
+            # Phase 19: milestone popup at every 5-hit threshold
+            if self._player_combo % 5 == 0:
+                self._pending_popups.append(
+                    (f"{self._player_combo} HIT!", state.ai.x, state.ai.y, True))
 
         if ai_hit:
             apply_hit(state.player, ai_hit)
@@ -578,6 +606,10 @@ class Engine:
             # Phase 16: increment AI combo streak
             self._ai_combo += 1
             self._ai_combo_flash = _COMBO_FLASH_FRAMES
+            # Phase 19: milestone popup at every 5-hit threshold
+            if self._ai_combo % 5 == 0:
+                self._pending_popups.append(
+                    (f"{self._ai_combo} HIT!", state.player.x, state.player.y, True))
 
         # --- Phase 17: dodge-avoided VFX / sound ---
         if player_dodge_avoided:
@@ -613,6 +645,9 @@ class Engine:
             self._pending_hit_vfx.append(
                 (state.player.x, state.player.y, False, "whiff"))
             self._player_combo = 0  # Phase 16: whiff breaks combo
+            # Phase 19: "MISS" text popup
+            self._pending_popups.append(
+                ("MISS", state.player.x, state.player.y, False))
 
         if (self._prev_ai_fsm == FSMState.ATTACK_ACTIVE
                 and state.ai.fsm_state == FSMState.ATTACK_RECOVERY
@@ -622,6 +657,9 @@ class Engine:
             self._pending_hit_vfx.append(
                 (state.ai.x, state.ai.y, False, "whiff"))
             self._ai_combo = 0  # Phase 16: whiff breaks combo
+            # Phase 19: "MISS" text popup
+            self._pending_popups.append(
+                ("MISS", state.ai.x, state.ai.y, False))
 
         # Decay whiff flash
         if self._player_whiff_flash > 0:
@@ -757,6 +795,8 @@ class Engine:
         self._ai_block_flash = 0
         self._player_guard_break_flash = 0
         self._ai_guard_break_flash = 0
+        # Phase 19: clear pending popups
+        self._pending_popups.clear()
 
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
