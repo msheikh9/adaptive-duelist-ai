@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, MISSING
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,9 @@ class AttackActionConfig:
     reach: int
     hitstun_frames: int
     knockback: int
+    # Inter-attack cooldown: ticks from commitment start until next use is legal.
+    # 0 = no cooldown (default for light attack). Set per-attack in game_config.yaml.
+    cooldown_ticks: int = 0
 
     @property
     def total_frames(self) -> int:
@@ -90,6 +93,13 @@ class BlockActionConfig:
     parry_window_frames: int = 3
     blockstun_frames: int = 6
     parry_stun_frames: int = 12
+    # Phase 18: guard meter
+    guard_max: int = 100
+    guard_cost_light: int = 25
+    guard_cost_heavy: int = 60
+    guard_regen_per_tick: int = 2
+    guard_regen_delay_ticks: int = 60
+    guard_break_stun_frames: int = 45
 
 
 @dataclass(frozen=True)
@@ -382,6 +392,11 @@ def _build_dataclass(cls: type, raw: dict | None, path: str):
         if raw_value is None:
             if defaults is not None:
                 kwargs[field_name] = getattr(defaults, field_name)
+            elif field_obj.default is not MISSING:
+                # Field has its own default even though the class has required fields
+                kwargs[field_name] = field_obj.default
+            elif field_obj.default_factory is not MISSING:
+                kwargs[field_name] = field_obj.default_factory()
             else:
                 raise ConfigError(f"{field_path}: required field is missing")
             continue

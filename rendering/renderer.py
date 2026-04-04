@@ -24,6 +24,11 @@ Phase 17 additions:
   - Whiff tint on attacker when whiff flash is active
   - Dodge cooldown pip in HUD below stamina bar
   - Floating damage text (_FloatText, spawn_damage_text)
+
+Phase 16 additions:
+  - spawn_hit_particles() adds kind="land" (landing dust at floor level)
+  - render() accepts player_combo, ai_combo, player_combo_flash, ai_combo_flash
+  - _draw_fighter_hud() renders combo counter (×N) below FSM label
 """
 
 from __future__ import annotations
@@ -116,7 +121,7 @@ class Renderer:
         """Spawn impact particles at the given sub-pixel position.
 
         Called by the engine with the defender's sub-pixel coords.
-        kind ∈ {"light", "heavy", "dodge", "whiff"}
+        kind ∈ {"light", "heavy", "dodge", "whiff", "land"}
         """
         if self._screen is None:
             return
@@ -134,6 +139,7 @@ class Renderer:
             kind = "heavy"
 
         # Per-kind particle parameters
+        vy_bias = -1.0  # default: slight upward bias
         if kind == "heavy":
             n, speed, lifetime = 10, 5.5, 15
             color = (255, 130, 40)   # orange-red
@@ -143,6 +149,20 @@ class Renderer:
         elif kind == "whiff":
             n, speed, lifetime = 3, 1.8, 7
             color = (140, 140, 140)  # grey puff
+        elif kind == "land":
+            # Phase 16: landing dust — spawns at ground level, spreads outward
+            n, speed, lifetime = 8, 2.0, 9
+            color   = (160, 140, 100)  # dusty tan
+            screen_y = arena_y         # override to floor line
+            vy_bias  = -0.3            # mostly horizontal spread
+        elif kind == "block":
+            # Phase 18: block absorption — teal sparks, inward burst
+            n, speed, lifetime = 7, 3.5, 10
+            color = (60, 210, 230)   # cyan/teal
+        elif kind == "guard_break":
+            # Phase 18: guard break — large burst of orange-red shards
+            n, speed, lifetime = 14, 6.0, 18
+            color = (255, 90, 30)    # orange-red
         else:  # "light"
             n, speed, lifetime = 6, 3.2, 10
             color = (255, 255, 160)  # pale yellow
@@ -155,7 +175,7 @@ class Renderer:
                 x=float(screen_x),
                 y=float(screen_y),
                 vx=math.cos(angle) * spd,
-                vy=math.sin(angle) * spd - 1.0,  # slight upward bias
+                vy=math.sin(angle) * spd + vy_bias,
                 lifetime=lifetime,
                 max_lifetime=lifetime,
                 color=color,
@@ -241,22 +261,46 @@ class Renderer:
         ai_whiff: int = 0,
         player_dodge_cd: int = 0,
         ai_dodge_cd: int = 0,
+        player_heavy_cd: int = 0,
+        ai_heavy_cd: int = 0,
         shake_x: int = 0,
         shake_y: int = 0,
+        player_combo: int = 0,
+        ai_combo: int = 0,
+        player_combo_flash: int = 0,
+        ai_combo_flash: int = 0,
+        player_guard: int = 100,
+        ai_guard: int = 100,
+        player_block_flash: int = 0,
+        ai_block_flash: int = 0,
+        player_guard_break_flash: int = 0,
+        ai_guard_break_flash: int = 0,
     ) -> None:
         """Render one frame of the game.
 
         Args:
-            state:           Current simulation state (read-only).
-            show_help:       If True, draw the controls overlay on top.
-            player_flash:    Ticks remaining for player hit-flash effect.
-            ai_flash:        Ticks remaining for AI hit-flash effect.
-            player_whiff:    Ticks remaining for player whiff-flash effect.
-            ai_whiff:        Ticks remaining for AI whiff-flash effect.
-            player_dodge_cd: Remaining dodge cooldown ticks for the player.
-            ai_dodge_cd:     Remaining dodge cooldown ticks for the AI.
-            shake_x:         Horizontal screen-shake offset (pixels).
-            shake_y:         Vertical screen-shake offset (pixels).
+            state:            Current simulation state (read-only).
+            show_help:        If True, draw the controls overlay on top.
+            player_flash:     Ticks remaining for player hit-flash effect.
+            ai_flash:         Ticks remaining for AI hit-flash effect.
+            player_whiff:     Ticks remaining for player whiff-flash effect.
+            ai_whiff:         Ticks remaining for AI whiff-flash effect.
+            player_dodge_cd:  Remaining dodge cooldown ticks for the player.
+            ai_dodge_cd:      Remaining dodge cooldown ticks for the AI.
+            player_heavy_cd:  Remaining heavy attack cooldown ticks for the player.
+            ai_heavy_cd:      Remaining heavy attack cooldown ticks for the AI.
+            shake_x:          Horizontal screen-shake offset (pixels).
+            shake_y:          Vertical screen-shake offset (pixels).
+            player_combo:     Player's current hit streak.
+            ai_combo:         AI's current hit streak.
+            player_combo_flash: Display frames remaining for player combo emphasis.
+            ai_combo_flash:   Display frames remaining for AI combo emphasis.
+            player_guard:     Player's current guard meter value.
+            ai_guard:         AI's current guard meter value.
+            player_block_flash:       Display frames for block-absorbed-hit flash.
+            ai_block_flash:           Display frames for AI block-absorbed-hit flash.
+            player_guard_break_flash: Display frames for player guard break flash.
+            ai_guard_break_flash:     Display frames for AI guard break flash.
         """
         if self._screen is None:
             return
@@ -274,17 +318,32 @@ class Renderer:
         # ------------------------------------------------------------------
         # Fighters
         # ------------------------------------------------------------------
+        max_guard = self._gcfg.actions.block.guard_max
         max_dodge_cd = self._gcfg.actions.dodge_backward.cooldown_frames
         self._draw_fighter(screen, state.player, colors.player, arena_render_y,
-                           "PLAYER", player_flash, whiff_ticks=player_whiff)
+                           "PLAYER", player_flash, whiff_ticks=player_whiff,
+                           block_flash=player_block_flash,
+                           guard_break_flash=player_guard_break_flash)
         self._draw_fighter(screen, state.ai, colors.ai, arena_render_y,
-                           "AI", ai_flash, whiff_ticks=ai_whiff)
+                           "AI", ai_flash, whiff_ticks=ai_whiff,
+                           block_flash=ai_block_flash,
+                           guard_break_flash=ai_guard_break_flash)
 
         # ------------------------------------------------------------------
         # HUD
         # ------------------------------------------------------------------
-        self._draw_hud(screen, state, player_dodge_cd=player_dodge_cd,
-                       ai_dodge_cd=ai_dodge_cd, max_dodge_cd=max_dodge_cd)
+        self._draw_hud(screen, state,
+                       player_dodge_cd=player_dodge_cd, ai_dodge_cd=ai_dodge_cd,
+                       max_dodge_cd=max_dodge_cd,
+                       player_heavy_cd=player_heavy_cd, ai_heavy_cd=ai_heavy_cd,
+                       player_guard=player_guard, ai_guard=ai_guard,
+                       max_guard=max_guard)
+
+        # ------------------------------------------------------------------
+        # Combo corner display (arcade-style, separate from HUD bars)
+        # ------------------------------------------------------------------
+        self._draw_combo_corner(screen, player_combo, player_combo_flash, align="left")
+        self._draw_combo_corner(screen, ai_combo,     ai_combo_flash,     align="right")
 
         # ------------------------------------------------------------------
         # Match-end overlay
@@ -407,21 +466,27 @@ class Renderer:
 
     def _draw_hud(self, screen: pygame.Surface, state: SimulationState,
                   player_dodge_cd: int = 0, ai_dodge_cd: int = 0,
-                  max_dodge_cd: int = 45) -> None:
+                  max_dodge_cd: int = 45,
+                  player_heavy_cd: int = 0, ai_heavy_cd: int = 0,
+                  player_guard: int = 100, ai_guard: int = 100,
+                  max_guard: int = 100) -> None:
         colors  = self._dcfg.colors
         gcfg    = self._gcfg
         hud     = self._dcfg.hud
         w       = self._dcfg.window.width
 
-        BAR_W   = hud.hp_bar_width
-        LEFT_X  = 20
-        RIGHT_X = w - BAR_W - 20
+        BAR_W         = hud.hp_bar_width
+        LEFT_X        = 20
+        RIGHT_X       = w - BAR_W - 20
+        max_heavy_cd  = gcfg.actions.heavy_attack.cooldown_ticks
 
         # ---- Player side (left) ----
         self._draw_fighter_hud(
             screen, state.player, gcfg.fighter.max_hp, gcfg.fighter.max_stamina,
             LEFT_X, 16, "PLAYER", align="left",
             dodge_cd=player_dodge_cd, max_dodge_cd=max_dodge_cd,
+            heavy_cd=player_heavy_cd, max_heavy_cd=max_heavy_cd,
+            guard=player_guard, max_guard=max_guard,
         )
 
         # ---- AI side (right) ----
@@ -429,6 +494,8 @@ class Renderer:
             screen, state.ai, gcfg.fighter.max_hp, gcfg.fighter.max_stamina,
             RIGHT_X, 16, "AI", align="right",
             dodge_cd=ai_dodge_cd, max_dodge_cd=max_dodge_cd,
+            heavy_cd=ai_heavy_cd, max_heavy_cd=max_heavy_cd,
+            guard=ai_guard, max_guard=max_guard,
         )
 
         # ---- Center info: tier badge + tick ----
@@ -452,6 +519,10 @@ class Renderer:
         align: str = "left",
         dodge_cd: int = 0,
         max_dodge_cd: int = 45,
+        heavy_cd: int = 0,
+        max_heavy_cd: int = 0,
+        guard: int = 100,
+        max_guard: int = 100,
     ) -> None:
         colors = self._dcfg.colors
         hud    = self._dcfg.hud
@@ -503,16 +574,38 @@ class Renderer:
         dodge_y = stm_y + STM_H + 2
         if max_dodge_cd > 0 and dodge_cd > 0:
             cd_frac = dodge_cd / max_dodge_cd
-            # Filled portion shows remaining cooldown (red → fades left as it counts down)
             self._draw_bar(screen, x, dodge_y, BAR_W, 3,
                            cd_frac, (200, 80, 80), (40, 40, 40), colors.border)
         else:
-            # Ready: draw a dim green ready indicator
             self._draw_bar(screen, x, dodge_y, BAR_W, 3,
                            1.0, (60, 140, 60), (40, 40, 40), colors.border)
 
+        # Phase 17b: heavy attack cooldown pip (below dodge pip)
+        heavy_y = dodge_y + 3 + 2
+        if max_heavy_cd > 0 and heavy_cd > 0:
+            h_frac = heavy_cd / max_heavy_cd
+            self._draw_bar(screen, x, heavy_y, BAR_W, 3,
+                           h_frac, (220, 140, 40), (40, 40, 40), colors.border)
+        elif max_heavy_cd > 0:
+            self._draw_bar(screen, x, heavy_y, BAR_W, 3,
+                           1.0, (60, 140, 60), (40, 40, 40), colors.border)
+
+        # Phase 18: guard bar (6px, teal when healthy, red when critical/broken)
+        guard_y = heavy_y + 3 + 2
+        if max_guard > 0:
+            g_frac = max(0.0, guard / max_guard)
+            # Teal/cyan when ≥25%, orange-red when low, dark red when 0
+            if g_frac <= 0.0:
+                g_fill = (160, 30, 30)   # broken: dark red
+            elif g_frac <= 0.25:
+                g_fill = (220, 80, 40)   # critical: orange-red
+            else:
+                g_fill = (40, 190, 200)  # healthy: teal/cyan
+            self._draw_bar(screen, x, guard_y, BAR_W, 6,
+                           g_frac, g_fill, (30, 30, 40), colors.border)
+
         # FSM state label
-        state_y = dodge_y + 3 + 4
+        state_y = guard_y + 6 + 4
         fsm_surf = self._tiny_font.render(
             fighter.fsm_state.name.replace("_", " "), True, colors.text_secondary
         )
@@ -520,6 +613,69 @@ class Renderer:
             screen.blit(fsm_surf, (x + BAR_W - fsm_surf.get_width(), state_y))
         else:
             screen.blit(fsm_surf, (x, state_y))
+
+    def _draw_combo_corner(
+        self,
+        screen: pygame.Surface,
+        combo: int,
+        combo_flash: int,
+        align: str,
+    ) -> None:
+        """Draw the arcade-style combo counter in the upper-left or upper-right corner.
+
+        Shown only when combo >= 2. At 3+ uses accent color with a highlighted
+        border. combo_flash > 0 draws a thicker border for the pulse effect.
+        """
+        if combo < 2 or self._large_font is None or self._small_font is None:
+            return
+
+        colors  = self._dcfg.colors
+        w_win   = self._dcfg.window.width
+
+        use_accent   = combo >= 3
+        combo_color  = colors.accent if use_accent else colors.text_secondary
+
+        number_surf = self._large_font.render(f"\xd7{combo}", True, combo_color)
+        label_surf  = self._small_font.render("COMBO", True, combo_color)
+
+        PAD     = 10
+        panel_w = max(number_surf.get_width(), label_surf.get_width()) + PAD * 2
+        panel_h = number_surf.get_height() + label_surf.get_height() + PAD + 6
+
+        # Vertical anchor: just below the HUD bars (~120px from top)
+        panel_y = 120
+
+        if align == "left":
+            panel_x = 20
+            num_x   = panel_x + PAD
+            lbl_x   = panel_x + PAD
+        else:
+            panel_x = w_win - 20 - panel_w
+            num_x   = panel_x + panel_w - PAD - number_surf.get_width()
+            lbl_x   = panel_x + panel_w - PAD - label_surf.get_width()
+
+        # Background — brighter panel when flashing
+        bg_color = (35, 25, 55) if (combo_flash > 0 and use_accent) else colors.panel_bg
+        pygame.draw.rect(screen, bg_color,
+                         (panel_x, panel_y, panel_w, panel_h), border_radius=6)
+
+        # Border: thicker + accent color while flashing or when 3+
+        border_color  = colors.accent if (use_accent or combo_flash > 0) else colors.border
+        border_width  = 2 if combo_flash > 0 else 1
+        pygame.draw.rect(screen, border_color,
+                         (panel_x, panel_y, panel_w, panel_h),
+                         border_width, border_radius=6)
+
+        # Glow effect: semi-transparent multi-offset blits when flashing at 3+
+        if combo_flash > 0 and use_accent and self._large_font is not None:
+            glow_surf = self._large_font.render(f"\xd7{combo}", True, colors.accent)
+            glow_surf.set_alpha(60)
+            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+                screen.blit(glow_surf, (num_x + dx, panel_y + PAD // 2 + dy))
+
+        # Number (×N) and label
+        screen.blit(number_surf, (num_x, panel_y + PAD // 2))
+        screen.blit(label_surf,  (lbl_x, panel_y + PAD // 2 + number_surf.get_height() + 3))
 
     def _draw_bar(
         self,
@@ -578,6 +734,8 @@ class Renderer:
         label: str,
         flash_ticks: int = 0,
         whiff_ticks: int = 0,
+        block_flash: int = 0,
+        guard_break_flash: int = 0,
     ) -> None:
         gcfg   = self._gcfg
         colors = self._dcfg.colors
@@ -600,11 +758,24 @@ class Renderer:
 
         # Tint based on FSM state
         state = fighter.fsm_state
-        if flash_ticks > 0:
+        if guard_break_flash > 0:
+            # Guard break: bright red-orange flash
+            draw_color = (255, 80, 40)
+        elif block_flash > 0:
+            # Block absorbed a hit: cyan/teal flash
+            draw_color = (40, 220, 230)
+        elif flash_ticks > 0:
             draw_color = colors.hit_flash
         elif whiff_ticks > 0:
             # Attacker whiffed: dim desaturated yellow-grey
             draw_color = (160, 150, 80)
+        elif state == FSMState.BLOCKING:
+            # Actively blocking: desaturated blue-grey shield tint
+            draw_color = tuple(min(255, int(c * 0.5 + 80)) for c in base_color)
+        elif state == FSMState.BLOCKSTUN:
+            draw_color = (80, 140, 200)
+        elif state == FSMState.PARRY_STUNNED:
+            draw_color = (200, 60, 200)   # magenta: guard-break stunned
         elif state == FSMState.HITSTUN:
             draw_color = (255, 255, 255)
         elif state == FSMState.ATTACK_ACTIVE:
@@ -632,6 +803,15 @@ class Renderer:
         # Outline (slightly lighter than body for depth)
         outline = tuple(min(255, c + 40) for c in draw_color)
         pygame.draw.rect(screen, outline, rect, 2)
+
+        # Phase 18: shield bubble when blocking
+        if state == FSMState.BLOCKING:
+            shield_surf = pygame.Surface((fw + 16, fh + 16), pygame.SRCALPHA)
+            pygame.draw.rect(shield_surf, (80, 200, 255, 70),
+                             (0, 0, fw + 16, fh + 16), border_radius=8)
+            pygame.draw.rect(shield_surf, (120, 220, 255, 160),
+                             (0, 0, fw + 16, fh + 16), 2, border_radius=8)
+            screen.blit(shield_surf, (render_x - 8, render_y - 8))
 
         # KO marker
         if state == FSMState.KO:

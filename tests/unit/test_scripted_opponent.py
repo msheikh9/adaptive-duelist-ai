@@ -71,6 +71,7 @@ def _collect_decisions(opponent, fighter, sim, game_cfg, n: int) -> list[CombatC
         fighter.stamina = game_cfg.fighter.max_stamina
         fighter.fsm_frames_remaining = 0
         fighter.dodge_cooldown = 0
+        fighter.heavy_cooldown = 0
 
         commit = opponent.decide(fighter, sim, game_cfg)
         if commit is not None:

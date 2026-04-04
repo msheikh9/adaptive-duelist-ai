@@ -90,6 +90,13 @@ class FighterState:
     # Phase 17: dodge cooldown counter (ticks until next dodge is legal; 0 = ready)
     dodge_cooldown: int = 0
 
+    # Phase 17b: heavy attack cooldown (ticks until next heavy is legal; 0 = ready)
+    heavy_cooldown: int = 0
+
+    # Phase 18: guard meter (0 = guard broken; regenerates when not blocking)
+    guard: int = 100
+    guard_regen_delay: int = 0
+
     @property
     def is_free(self) -> bool:
         return self.fsm_state in (FSMState.IDLE, FSMState.MOVING)

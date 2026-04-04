@@ -27,6 +27,10 @@ def can_commit(fighter: FighterState, commitment: CombatCommitment,
     if commitment == CombatCommitment.DODGE_BACKWARD and fighter.dodge_cooldown > 0:
         return False
 
+    # Phase 17b: heavy attack cooldown
+    if commitment == CombatCommitment.HEAVY_ATTACK and fighter.heavy_cooldown > 0:
+        return False
+
     # Check stamina requirements
     stamina_cost = get_stamina_cost(commitment, config)
     if stamina_cost is not None and fighter.stamina < stamina_cost:
@@ -67,6 +71,8 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.ATTACK_STARTUP
             fighter.fsm_frames_remaining = config.actions.heavy_attack.startup_frames
             fighter.stamina -= config.actions.heavy_attack.stamina_cost
+            # Phase 17b: start inter-heavy cooldown immediately on commitment
+            fighter.heavy_cooldown = config.actions.heavy_attack.cooldown_ticks
 
         case CombatCommitment.DODGE_BACKWARD:
             fighter.fsm_state = FSMState.DODGE_STARTUP
@@ -89,6 +95,11 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.JUMP_STARTUP
             fighter.fsm_frames_remaining = config.fighter.jump_startup_frames
             # velocity_y is set on JUMP_STARTUP → AIRBORNE transition in tick_fsm
+
+        case CombatCommitment.BLOCK_START:
+            fighter.fsm_state = FSMState.BLOCKING
+            fighter.fsm_frames_remaining = 0
+            fighter.velocity_x = 0
 
 
 def stop_moving(fighter: FighterState) -> None:
@@ -133,6 +144,22 @@ def enter_landing(fighter: FighterState, recovery_frames: int) -> None:
     fighter.active_commitment = None
 
 
+def enter_blockstun(fighter: FighterState, frames: int) -> None:
+    """Force a fighter into blockstun (from absorbing a hit while blocking)."""
+    fighter.fsm_state = FSMState.BLOCKSTUN
+    fighter.fsm_frames_remaining = frames
+    fighter.velocity_x = 0
+    fighter.active_commitment = None
+
+
+def enter_parry_stunned(fighter: FighterState, frames: int) -> None:
+    """Force a fighter into parry-stunned state (guard broken)."""
+    fighter.fsm_state = FSMState.PARRY_STUNNED
+    fighter.fsm_frames_remaining = frames
+    fighter.velocity_x = 0
+    fighter.active_commitment = None
+
+
 def tick_dodge_cooldown(fighter: FighterState) -> None:
     """Decrement the inter-dodge cooldown by one tick.
 
@@ -141,6 +168,16 @@ def tick_dodge_cooldown(fighter: FighterState) -> None:
     """
     if fighter.dodge_cooldown > 0:
         fighter.dodge_cooldown -= 1
+
+
+def tick_heavy_cooldown(fighter: FighterState) -> None:
+    """Decrement the inter-heavy-attack cooldown by one tick.
+
+    Called every SIMULATE tick regardless of FSM state so the cooldown
+    counts down even while the fighter is locked in other animations.
+    """
+    if fighter.heavy_cooldown > 0:
+        fighter.heavy_cooldown -= 1
 
 
 def _get_attack_config(commitment: CombatCommitment, config: GameConfig):
@@ -161,7 +198,8 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
     """
     state = fighter.fsm_state
 
-    if state in (FSMState.IDLE, FSMState.MOVING, FSMState.KO, FSMState.AIRBORNE):
+    if state in (FSMState.IDLE, FSMState.MOVING, FSMState.KO, FSMState.AIRBORNE,
+                 FSMState.BLOCKING):
         return
 
     if fighter.fsm_frames_remaining > 0:
@@ -216,5 +254,13 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
             fighter.fsm_frames_remaining = 0
 
         case FSMState.LANDING:
+            fighter.fsm_state = FSMState.IDLE
+            fighter.fsm_frames_remaining = 0
+
+        case FSMState.BLOCKSTUN:
+            fighter.fsm_state = FSMState.IDLE
+            fighter.fsm_frames_remaining = 0
+
+        case FSMState.PARRY_STUNNED:
             fighter.fsm_state = FSMState.IDLE
             fighter.fsm_frames_remaining = 0

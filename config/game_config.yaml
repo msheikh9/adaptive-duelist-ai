@@ -41,13 +41,14 @@ actions:
     reach: 120
     hitstun_frames: 12
     knockback: 80
+    cooldown_ticks: 45
   dodge_backward:
     startup_frames: 3
     active_frames: 5
     recovery_frames: 12
     stamina_cost: 25
     distance: 130
-    cooldown_frames: 45
+    cooldown_frames: 65
   block:
     startup_frames: 3
     stamina_cost_per_tick: 2
@@ -55,6 +56,12 @@ actions:
     parry_window_frames: 3
     blockstun_frames: 6
     parry_stun_frames: 12
+    guard_max: 100
+    guard_cost_light: 25
+    guard_cost_heavy: 60
+    guard_regen_per_tick: 2
+    guard_regen_delay_ticks: 60
+    guard_break_stun_frames: 45
   move:
     stamina_cost_per_tick: 0.5
 

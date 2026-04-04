@@ -60,6 +60,15 @@ class PlayerController:
                             and attempt_commitment(fighter, CombatCommitment.JUMP, config)):
                         committed = CombatCommitment.JUMP
 
+                case InputAction.PRESS_BLOCK:
+                    if attempt_commitment(fighter, CombatCommitment.BLOCK_START, config):
+                        committed = CombatCommitment.BLOCK_START
+
+                case InputAction.RELEASE_BLOCK:
+                    if fighter.fsm_state == FSMState.BLOCKING:
+                        fighter.fsm_state = FSMState.IDLE
+                        fighter.active_commitment = None
+
         # Handle movement from held keys (only if no attack/dodge was committed)
         if committed is None and fighter.is_free:
             if self._holding_left and not self._holding_right:

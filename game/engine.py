@@ -17,6 +17,13 @@ Phase 15 additions:
   - Impact VFX           — particle spawn notifications to renderer
   - Sound hooks          — NullSoundManager wired at all combat events
   - Gravity / landing    — apply_gravity + handle_landing in simulate loop
+
+Phase 16 additions:
+  - Combo counter        — _player_combo / _ai_combo streak tracking; reset on
+                           whiff or opponent HITSTUN recovery; passed to renderer
+  - Landing dust         — "land" VFX appended to _pending_hit_vfx on touch-down
+  - Exponential shake    — _shake_max_frames tracked; _compute_shake_offset uses
+                           power-curve decay (** 1.5) instead of flat intensity
 """
 
 from __future__ import annotations
@@ -48,8 +55,9 @@ from game.combat.physics import (
     update_facing,
 )
 from game.combat.stamina import tick_stamina
+from game.combat.guard import apply_block_response, tick_guard
 from game.combat.state_machine import (
-    enter_landing, tick_fsm, stop_moving, tick_dodge_cooldown,
+    enter_landing, tick_fsm, stop_moving, tick_dodge_cooldown, tick_heavy_cooldown,
 )
 from game.entities.ai_fighter import BaselineAIController
 from game.entities.player_fighter import PlayerController
@@ -86,6 +94,9 @@ _SHAKE_INTENSITY_HEAVY = 6   # pixels
 
 # Phase 16: combo counter emphasis animation (display frames)
 _COMBO_FLASH_FRAMES = 15
+
+# Phase 18: guard break flash duration (display frames)
+_GUARD_BREAK_FLASH_FRAMES = 20
 
 
 class Engine:
@@ -140,6 +151,12 @@ class Engine:
         # Display frames remaining for combo emphasis animation
         self._player_combo_flash: int = 0
         self._ai_combo_flash: int = 0
+
+        # Phase 18: block/guard-break flash counters (display frames)
+        self._player_block_flash: int = 0    # player was hit while blocking
+        self._ai_block_flash: int = 0        # AI was hit while blocking
+        self._player_guard_break_flash: int = 0  # player's guard was broken
+        self._ai_guard_break_flash: int = 0      # AI's guard was broken
 
         # Phase 15: sound hooks
         self._sound = NullSoundManager()
@@ -303,8 +320,20 @@ class Engine:
                 ai_whiff=self._ai_whiff_flash,
                 player_dodge_cd=self._state.player.dodge_cooldown,
                 ai_dodge_cd=self._state.ai.dodge_cooldown,
+                player_heavy_cd=self._state.player.heavy_cooldown,
+                ai_heavy_cd=self._state.ai.heavy_cooldown,
                 shake_x=sx,
                 shake_y=sy,
+                player_combo=self._player_combo,
+                ai_combo=self._ai_combo,
+                player_combo_flash=self._player_combo_flash,
+                ai_combo_flash=self._ai_combo_flash,
+                player_guard=self._state.player.guard,
+                ai_guard=self._state.ai.guard,
+                player_block_flash=self._player_block_flash,
+                ai_block_flash=self._ai_block_flash,
+                player_guard_break_flash=self._player_guard_break_flash,
+                ai_guard_break_flash=self._ai_guard_break_flash,
             )
 
         # Decay counters at display rate
@@ -314,6 +343,18 @@ class Engine:
             self._ai_hit_flash -= 1
         if self._shake_remaining > 0:
             self._shake_remaining -= 1
+        if self._player_combo_flash > 0:
+            self._player_combo_flash -= 1
+        if self._ai_combo_flash > 0:
+            self._ai_combo_flash -= 1
+        if self._player_block_flash > 0:
+            self._player_block_flash -= 1
+        if self._ai_block_flash > 0:
+            self._ai_block_flash -= 1
+        if self._player_guard_break_flash > 0:
+            self._player_guard_break_flash -= 1
+        if self._ai_guard_break_flash > 0:
+            self._ai_guard_break_flash -= 1
 
         # Cap frame rate
         pygame.time.Clock().tick(self._dcfg.window.fps_cap)
@@ -428,6 +469,14 @@ class Engine:
         tick_dodge_cooldown(state.player)
         tick_dodge_cooldown(state.ai)
 
+        # --- Phase 17b: tick heavy attack cooldowns ---
+        tick_heavy_cooldown(state.player)
+        tick_heavy_cooldown(state.ai)
+
+        # --- Phase 18: tick guard regen ---
+        tick_guard(state.player, gcfg)
+        tick_guard(state.ai, gcfg)
+
         # --- Phase 15: apply gravity (before velocity) ---
         apply_gravity(state.player, state.arena, gcfg)
         apply_gravity(state.ai, state.arena, gcfg)
@@ -480,6 +529,38 @@ class Engine:
         )
 
         # --- Apply damage + trigger hit flash + juice ---
+
+        # Phase 18: check if defender was blocking — intercept hit before normal damage
+        if player_hit and state.ai.fsm_state == FSMState.BLOCKING:
+            guard_broken = apply_block_response(state.ai, player_hit, gcfg)
+            self._ai_block_flash = _HIT_FLASH_TICKS
+            self._player_combo = 0  # blocked hit doesn't continue a combo
+            if guard_broken:
+                self._ai_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                self._sound.play_guard_break()
+                self._pending_hit_vfx.append(
+                    (state.ai.x, state.ai.y, True, "guard_break"))
+            else:
+                self._sound.play_block()
+                self._pending_hit_vfx.append(
+                    (state.ai.x, state.ai.y, False, "block"))
+            player_hit = None  # consumed by block
+
+        if ai_hit and state.player.fsm_state == FSMState.BLOCKING:
+            guard_broken = apply_block_response(state.player, ai_hit, gcfg)
+            self._player_block_flash = _HIT_FLASH_TICKS
+            self._ai_combo = 0  # blocked hit doesn't continue a combo
+            if guard_broken:
+                self._player_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                self._sound.play_guard_break()
+                self._pending_hit_vfx.append(
+                    (state.player.x, state.player.y, True, "guard_break"))
+            else:
+                self._sound.play_block()
+                self._pending_hit_vfx.append(
+                    (state.player.x, state.player.y, False, "block"))
+            ai_hit = None  # consumed by block
+
         if player_hit:
             apply_hit(state.ai, player_hit)
             self._ai_hit_flash = _HIT_FLASH_TICKS
@@ -547,6 +628,17 @@ class Engine:
             self._player_whiff_flash -= 1
         if self._ai_whiff_flash > 0:
             self._ai_whiff_flash -= 1
+
+        # Phase 16: reset combo when opponent recovers from hitstun without being re-hit
+        if (self._prev_ai_fsm == FSMState.HITSTUN
+                and state.ai.fsm_state in FREE_STATES
+                and not player_hit):
+            self._player_combo = 0
+
+        if (self._prev_player_fsm == FSMState.HITSTUN
+                and state.player.fsm_state in FREE_STATES
+                and not ai_hit):
+            self._ai_combo = 0
 
         # --- Detect COMMITMENT_END transitions ---
         if (self._prev_player_fsm not in FREE_STATES
@@ -660,6 +752,11 @@ class Engine:
         self._ai_combo = 0
         self._player_combo_flash = 0
         self._ai_combo_flash = 0
+        # Phase 18: reset block/guard-break flash counters
+        self._player_block_flash = 0
+        self._ai_block_flash = 0
+        self._player_guard_break_flash = 0
+        self._ai_guard_break_flash = 0
 
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
@@ -744,6 +841,12 @@ class Engine:
                 ai_whiff=self._ai_whiff_flash,
                 player_dodge_cd=self._state.player.dodge_cooldown,
                 ai_dodge_cd=self._state.ai.dodge_cooldown,
+                player_guard=self._state.player.guard,
+                ai_guard=self._state.ai.guard,
+                player_block_flash=self._player_block_flash,
+                ai_block_flash=self._ai_block_flash,
+                player_guard_break_flash=self._player_guard_break_flash,
+                ai_guard_break_flash=self._ai_guard_break_flash,
             )
             pygame.time.Clock().tick(30)
 

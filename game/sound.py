@@ -40,3 +40,6 @@ class NullSoundManager:
 
     def play_block(self) -> None:
         """Incoming hit absorbed by block."""
+
+    def play_guard_break(self) -> None:
+        """Guard meter depleted — guard break triggered."""
