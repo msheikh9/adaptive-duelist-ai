@@ -23,6 +23,9 @@ KEYDOWN_MAP: dict[int, InputAction] = {
     # Phase 15: jump
     pygame.K_w: InputAction.PRESS_JUMP,
     pygame.K_UP: InputAction.PRESS_JUMP,
+    # Phase 20: ranged weapon (E / Right-Ctrl; K is already heavy attack)
+    pygame.K_e: InputAction.PRESS_SHOOT,
+    pygame.K_RCTRL: InputAction.PRESS_SHOOT,
 }
 
 # KEYUP events:
@@ -33,4 +36,7 @@ KEYUP_MAP: dict[int, InputAction] = {
     pygame.K_RIGHT: InputAction.RELEASE_RIGHT,
     pygame.K_l: InputAction.RELEASE_BLOCK,
     pygame.K_c: InputAction.RELEASE_BLOCK,
+    # Phase 20: release to fire
+    pygame.K_e: InputAction.RELEASE_SHOOT,
+    pygame.K_RCTRL: InputAction.RELEASE_SHOOT,
 }

@@ -108,6 +108,19 @@ class MoveActionConfig:
 
 
 @dataclass(frozen=True)
+class ShootActionConfig:
+    """Phase 20: Charged ranged weapon configuration."""
+    startup_frames: int = 5         # frames in SHOOT_STARTUP before CHARGING begins
+    max_charge_frames: int = 60     # charge saturates at this tick count
+    min_damage: int = 8             # damage at charge_frac == 0.0
+    max_damage: int = 30            # damage at charge_frac == 1.0
+    projectile_speed: int = 12      # pixels / tick (converted to sub-pixel in engine)
+    cooldown_frames: int = 45       # ticks from fire until next shot legal
+    active_frames: int = 2          # SHOOT_ACTIVE duration (brief glow/hitbox)
+    recovery_frames: int = 15       # SHOOT_RECOVERY duration
+
+
+@dataclass(frozen=True)
 class ActionsConfig:
     light_attack: AttackActionConfig = field(
         default_factory=lambda: AttackActionConfig(
@@ -124,6 +137,7 @@ class ActionsConfig:
     dodge_backward: DodgeActionConfig = field(default_factory=DodgeActionConfig)
     block: BlockActionConfig = field(default_factory=BlockActionConfig)
     move: MoveActionConfig = field(default_factory=MoveActionConfig)
+    shoot: ShootActionConfig = field(default_factory=ShootActionConfig)
 
 
 @dataclass(frozen=True)

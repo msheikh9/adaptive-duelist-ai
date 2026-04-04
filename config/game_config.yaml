@@ -64,6 +64,15 @@ actions:
     guard_break_stun_frames: 45
   move:
     stamina_cost_per_tick: 0.5
+  shoot:
+    startup_frames: 5
+    max_charge_frames: 60
+    min_damage: 8
+    max_damage: 30
+    projectile_speed: 12
+    cooldown_frames: 45
+    active_frames: 2
+    recovery_frames: 15
 
 simulation:
   tick_rate: 60

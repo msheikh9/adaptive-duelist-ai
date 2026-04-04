@@ -56,8 +56,10 @@ from game.combat.physics import (
 )
 from game.combat.stamina import tick_stamina
 from game.combat.guard import apply_block_response, tick_guard
+from game.combat.projectile import Projectile
 from game.combat.state_machine import (
     enter_landing, tick_fsm, stop_moving, tick_dodge_cooldown, tick_heavy_cooldown,
+    tick_shoot_cooldown,
 )
 from game.entities.ai_fighter import BaselineAIController
 from game.entities.player_fighter import PlayerController
@@ -92,8 +94,9 @@ _SHAKE_FRAMES_HEAVY    = 7
 _SHAKE_INTENSITY_LIGHT = 3   # pixels
 _SHAKE_INTENSITY_HEAVY = 6   # pixels
 
-# Phase 16: combo counter emphasis animation (display frames)
-_COMBO_FLASH_FRAMES = 15
+# Phase 16/20: combo flash = persistence timer (~1 second at 60fps display rate).
+# First 10 frames: scale-up animation. Last 15 frames: alpha fade-out.
+_COMBO_FLASH_FRAMES = 60
 
 # Phase 18: guard break flash duration (display frames)
 _GUARD_BREAK_FLASH_FRAMES = 20
@@ -164,6 +167,9 @@ class Engine:
         # Phase 19: pending text popups — (text, x_sub, y_sub, is_large)
         # Drained into renderer.spawn_text_popup() each display frame.
         self._pending_popups: list[tuple[str, int, int, bool]] = []
+
+        # Phase 20: live projectiles
+        self._projectiles: list[Projectile] = []
 
         # Phase 15: sound hooks
         self._sound = NullSoundManager()
@@ -348,6 +354,7 @@ class Engine:
                 player_guard_break_flash=self._player_guard_break_flash,
                 ai_guard_break_flash=self._ai_guard_break_flash,
                 show_hitboxes=self._show_hitboxes,
+                projectiles=self._projectiles,
             )
 
         # Decay counters at display rate
@@ -483,6 +490,35 @@ class Engine:
             elif ai_commitment == CombatCommitment.DODGE_BACKWARD:
                 self._sound.play_dodge_start()
 
+        # --- Phase 20: AI minimal shoot trigger ---
+        # Fires an uncharged instant shot roughly every 3 seconds.
+        # Uses tick % 180 == 90 so existing tests (< 90 ticks) are unaffected.
+        if (state.tick_id % 180 == 90
+                and state.ai.is_free
+                and state.ai.shoot_cooldown == 0):
+            from game.entities.fighter import attempt_commitment as _ac
+            _ac(state.ai, CombatCommitment.SHOOT_INSTANT, gcfg)
+
+        # --- Phase 20: accumulate charge ticks while in CHARGING state ---
+        if state.player.fsm_state == FSMState.CHARGING:
+            state.player.charge_ticks = min(
+                state.player.charge_ticks + 1,
+                gcfg.actions.shoot.max_charge_frames,
+            )
+        if state.ai.fsm_state == FSMState.CHARGING:
+            state.ai.charge_ticks = min(
+                state.ai.charge_ticks + 1,
+                gcfg.actions.shoot.max_charge_frames,
+            )
+
+        # --- Phase 20: fire pending shots ---
+        if state.player.pending_shot:
+            state.player.pending_shot = False
+            self._fire_projectile(state.player, "PLAYER", gcfg)
+        if state.ai.pending_shot:
+            state.ai.pending_shot = False
+            self._fire_projectile(state.ai, "AI", gcfg)
+
         # --- Phase 17: tick dodge cooldowns (every tick regardless of FSM state) ---
         tick_dodge_cooldown(state.player)
         tick_dodge_cooldown(state.ai)
@@ -490,6 +526,10 @@ class Engine:
         # --- Phase 17b: tick heavy attack cooldowns ---
         tick_heavy_cooldown(state.player)
         tick_heavy_cooldown(state.ai)
+
+        # --- Phase 20: tick shoot cooldowns ---
+        tick_shoot_cooldown(state.player)
+        tick_shoot_cooldown(state.ai)
 
         # --- Phase 18: tick guard regen ---
         tick_guard(state.player, gcfg)
@@ -593,6 +633,10 @@ class Engine:
             # Phase 16: increment player combo streak
             self._player_combo += 1
             self._player_combo_flash = _COMBO_FLASH_FRAMES
+            # Phase 20: combo ring burst at attacker when streak active
+            if self._player_combo >= 2:
+                self._pending_hit_vfx.append(
+                    (state.player.x, state.player.y, False, "combo_ring"))
             # Phase 19: milestone popup at every 5-hit threshold
             if self._player_combo % 5 == 0:
                 self._pending_popups.append(
@@ -606,6 +650,10 @@ class Engine:
             # Phase 16: increment AI combo streak
             self._ai_combo += 1
             self._ai_combo_flash = _COMBO_FLASH_FRAMES
+            # Phase 20: combo ring burst at attacker when streak active
+            if self._ai_combo >= 2:
+                self._pending_hit_vfx.append(
+                    (state.ai.x, state.ai.y, False, "combo_ring"))
             # Phase 19: milestone popup at every 5-hit threshold
             if self._ai_combo % 5 == 0:
                 self._pending_popups.append(
@@ -635,6 +683,9 @@ class Engine:
 
         tick_fsm(state.player, gcfg)
         tick_fsm(state.ai, gcfg)
+
+        # --- Phase 20: move projectiles + collision ---
+        self._update_projectiles(state, gcfg)
 
         # --- Phase 17: whiff detection (ATTACK_ACTIVE → ATTACK_RECOVERY without hit) ---
         if (self._prev_player_fsm == FSMState.ATTACK_ACTIVE
@@ -732,6 +783,140 @@ class Engine:
         else:
             self._sound.play_hit_light()
 
+    # --- Phase 20: projectile helpers ---
+
+    def _fire_projectile(self, shooter: "FighterState", owner: str,
+                         gcfg: GameConfig) -> None:
+        """Create a projectile from the shooter's position and start cooldown."""
+        shoot_cfg = gcfg.actions.shoot
+        charge_frac = min(1.0, shooter.charge_ticks / max(1, shoot_cfg.max_charge_frames))
+        damage = round(shoot_cfg.min_damage + charge_frac * (shoot_cfg.max_damage - shoot_cfg.min_damage))
+        speed_sub = shoot_cfg.projectile_speed * gcfg.simulation.sub_pixel_scale
+        velocity_x = speed_sub * shooter.facing
+
+        proj = Projectile(
+            x=shooter.x,
+            y=shooter.y,
+            velocity_x=velocity_x,
+            damage=damage,
+            owner=owner,
+            charge_frac=charge_frac,
+        )
+        self._projectiles.append(proj)
+
+        # Start cooldown on the shooter
+        shooter.shoot_cooldown = shoot_cfg.cooldown_frames
+        shooter.charge_ticks = 0
+
+        # Muzzle flash VFX
+        self._pending_hit_vfx.append((shooter.x, shooter.y, False, "muzzle_flash"))
+
+    def _update_projectiles(self, state: "SimulationState",
+                             gcfg: GameConfig) -> None:
+        """Move all active projectiles and check collisions."""
+        if not self._projectiles:
+            return
+
+        arena_w = state.arena.width_sub
+        fighter_w = gcfg.fighter.width * gcfg.simulation.sub_pixel_scale
+        fighter_h = gcfg.fighter.height * gcfg.simulation.sub_pixel_scale
+
+        for proj in self._projectiles:
+            if not proj.active:
+                continue
+
+            proj.x += proj.velocity_x
+
+            # Deactivate if it leaves the arena
+            if proj.x < 0 or proj.x > arena_w:
+                proj.active = False
+                continue
+
+            # Collision with opponent fighter
+            if proj.owner == "PLAYER":
+                target = state.ai
+                target_name = "AI"
+            else:
+                target = state.player
+                target_name = "PLAYER"
+
+            # Simple AABB: projectile is a 16x16 sub-pixel region (1/6 of fighter width)
+            proj_r = fighter_w // 6
+            t_left  = target.x - fighter_w // 2
+            t_right = target.x + fighter_w // 2
+            t_top   = target.y - fighter_h
+            t_bot   = target.y
+
+            if (t_left - proj_r <= proj.x <= t_right + proj_r
+                    and t_top - proj_r <= proj.y <= t_bot + proj_r):
+                self._handle_projectile_hit(proj, target, target_name, state, gcfg)
+                proj.active = False
+
+        # Remove spent projectiles
+        self._projectiles = [p for p in self._projectiles if p.active]
+
+    def _handle_projectile_hit(self, proj: Projectile, target: "FighterState",
+                                target_name: str, state: "SimulationState",
+                                gcfg: GameConfig) -> None:
+        """Apply projectile hit damage + juice without melee HitTracker."""
+        from game.combat.damage import apply_hit as _apply_hit
+        from game.combat.state_machine import enter_hitstun as _enter_hitstun
+
+        is_heavy = proj.charge_frac >= 0.5
+
+        if target.fsm_state == FSMState.BLOCKING:
+            # Treat as a chip-only block (use guard system)
+            from game.combat.guard import apply_block_response as _abr
+            # Build a minimal hit-like object
+            class _FakeHit:
+                damage = proj.damage
+                attacker_commitment = CombatCommitment.LIGHT_ATTACK  # treat as light for guard cost
+
+            guard_broken = _abr(target, _FakeHit(), gcfg)
+            self._pending_hit_vfx.append((target.x, target.y, False, "block"))
+            if guard_broken:
+                self._sound.play_guard_break()
+                if target_name == "AI":
+                    self._ai_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                    self._pending_popups.append(("GUARD BREAK!", target.x, target.y, True))
+                else:
+                    self._player_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                    self._pending_popups.append(("GUARD BREAK!", target.x, target.y, True))
+            return
+
+        if target.fsm_state == FSMState.KO:
+            return
+
+        # Apply damage + hitstun
+        target.hp = max(0, target.hp - proj.damage)
+        if target.hp == 0:
+            from game.combat.state_machine import enter_ko as _enter_ko
+            _enter_ko(target)
+        else:
+            hitstun = 8 if is_heavy else 5
+            _enter_hitstun(target, hitstun)
+
+        # Hit flash
+        if target_name == "AI":
+            self._ai_hit_flash = _HIT_FLASH_TICKS
+        else:
+            self._player_hit_flash = _HIT_FLASH_TICKS
+
+        # VFX
+        kind = "heavy" if is_heavy else "light"
+        self._pending_hit_vfx.append((proj.x, proj.y, is_heavy, "projectile_hit"))
+        self._pending_hit_vfx.append((proj.x, proj.y, is_heavy, kind))
+
+        # Hitstop (lighter than melee)
+        self._hitstop_remaining = max(self._hitstop_remaining,
+                                      _HITSTOP_LIGHT if not is_heavy else _HITSTOP_HEAVY)
+
+        # Sound
+        if is_heavy:
+            self._sound.play_hit_heavy()
+        else:
+            self._sound.play_hit_light()
+
     def _start_match(self) -> None:
         """Initialize a new match."""
         gcfg = self._gcfg
@@ -797,6 +982,8 @@ class Engine:
         self._ai_guard_break_flash = 0
         # Phase 19: clear pending popups
         self._pending_popups.clear()
+        # Phase 20: clear projectiles
+        self._projectiles.clear()
 
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
@@ -887,6 +1074,7 @@ class Engine:
                 ai_block_flash=self._ai_block_flash,
                 player_guard_break_flash=self._player_guard_break_flash,
                 ai_guard_break_flash=self._ai_guard_break_flash,
+                projectiles=self._projectiles,
             )
             pygame.time.Clock().tick(30)
 

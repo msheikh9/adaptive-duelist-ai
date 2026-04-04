@@ -23,3 +23,6 @@ class InputAction(Enum):
     RELEASE_BLOCK = auto()
     # Phase 15: jump
     PRESS_JUMP = auto()
+    # Phase 20: ranged weapon
+    PRESS_SHOOT = auto()
+    RELEASE_SHOOT = auto()

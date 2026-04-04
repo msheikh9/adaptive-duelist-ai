@@ -160,32 +160,44 @@ class Renderer:
             kind = "heavy"
 
         # Per-kind particle parameters
-        vy_bias = -1.0  # default: slight upward bias
+        vy_bias  = -1.0   # default: slight upward bias
+        ring_r   = 0      # non-zero → also spawn an expanding ring
+        ring_col = (255, 255, 255)
         if kind == "heavy":
-            n, speed, lifetime = 10, 5.5, 15
-            color = (255, 130, 40)   # orange-red
+            n, speed, lifetime = 14, 6.0, 17   # Phase 19: more particles
+            color   = (255, 130, 40)   # orange-red
+            ring_r  = 40               # Phase 19: impact ring
+            ring_col = (255, 160, 60)
         elif kind == "dodge":
             n, speed, lifetime = 6, 4.0, 11
             color = (80, 200, 220)   # teal/cyan
         elif kind == "whiff":
-            n, speed, lifetime = 3, 1.8, 7
-            color = (140, 140, 140)  # grey puff
+            n, speed, lifetime = 6, 2.4, 9    # Phase 19: more visible whiff
+            color = (160, 160, 160)  # brighter grey puff
         elif kind == "land":
             # Phase 16: landing dust — spawns at ground level, spreads outward
             n, speed, lifetime = 8, 2.0, 9
-            color   = (160, 140, 100)  # dusty tan
-            screen_y = arena_y         # override to floor line
-            vy_bias  = -0.3            # mostly horizontal spread
+            color    = (160, 140, 100)  # dusty tan
+            screen_y = arena_y          # override to floor line
+            vy_bias  = -0.3             # mostly horizontal spread
         elif kind == "block":
             # Phase 18: block absorption — teal sparks, inward burst
-            n, speed, lifetime = 7, 3.5, 10
+            n, speed, lifetime = 8, 3.5, 11
             color = (60, 210, 230)   # cyan/teal
         elif kind == "guard_break":
-            # Phase 18: guard break — large burst of orange-red shards
-            n, speed, lifetime = 14, 6.0, 18
-            color = (255, 90, 30)    # orange-red
+            # Phase 18/19: guard break — large burst with ring
+            n, speed, lifetime = 18, 7.0, 20
+            color    = (255, 90, 30)    # orange-red
+            ring_r   = 60
+            ring_col = (255, 60, 20)
+        elif kind == "combo_ring":
+            # Phase 20: combo pulse — accent ring at attacker, no particles
+            n, speed, lifetime = 0, 0.0, 0
+            color    = (160, 120, 240)  # accent purple (unused, n=0)
+            ring_r   = 34
+            ring_col = (160, 120, 240)  # accent purple ring
         else:  # "light"
-            n, speed, lifetime = 6, 3.2, 10
+            n, speed, lifetime = 8, 3.5, 11   # Phase 19: slightly more
             color = (255, 255, 160)  # pale yellow
 
         rng = self._particle_rng
@@ -200,6 +212,18 @@ class Renderer:
                 lifetime=lifetime,
                 max_lifetime=lifetime,
                 color=color,
+            ))
+
+        # Phase 19: spawn impact ring for heavy hits / guard breaks
+        if ring_r > 0:
+            self._rings.append(_Ring(
+                x=float(screen_x),
+                y=float(screen_y),
+                radius=4.0,
+                max_radius=float(ring_r),
+                lifetime=12,
+                max_lifetime=12,
+                color=ring_col,
             ))
 
     def spawn_damage_text(self, amount: int, x_sub: int, y_sub: int,
@@ -227,6 +251,202 @@ class Renderer:
             color=color,
         ))
 
+    def spawn_text_popup(self, text: str, x_sub: int, y_sub: int,
+                        is_large: bool = False) -> None:
+        """Spawn a floating text popup (MISS, GUARD BREAK!, combo milestones).
+
+        Phase 19: large=True uses the 18px font; False uses 11px tiny font.
+        """
+        if self._screen is None:
+            return
+
+        scale   = self._scale
+        arena_y = self._arena_y()
+        fh      = self._gcfg.fighter.height
+
+        screen_x = float(40 + x_sub // scale)
+        y_offset = (y_sub - self._ground_y_sub) // scale
+        # Slightly above the fighter, extra clearance for large text
+        y_lift = fh + (18 if is_large else 8)
+        screen_y = float(arena_y - y_lift + y_offset)
+
+        if is_large:
+            color    = (255, 220, 60)   # bright yellow for milestones / guard break
+            lifetime = 50
+        else:
+            color    = (200, 200, 200)  # grey for MISS
+            lifetime = 28
+
+        self._float_texts.append(_FloatText(
+            x=screen_x,
+            y=screen_y,
+            text=text,
+            lifetime=lifetime,
+            max_lifetime=lifetime,
+            color=color,
+            large=is_large,
+        ))
+
+    def _get_weapon_tip(self, fighter, arena_y: int) -> tuple[float, float] | None:
+        """Return screen-space (x, y) of the weapon tip during attack states.
+
+        Returns None if the fighter is not in an attack state.
+        """
+        from game.combat.actions import CombatCommitment
+        state = fighter.fsm_state
+        if state not in (FSMState.ATTACK_STARTUP, FSMState.ATTACK_ACTIVE,
+                         FSMState.ATTACK_RECOVERY):
+            return None
+
+        commitment = fighter.active_commitment
+        if commitment == CombatCommitment.LIGHT_ATTACK:
+            reach = self._gcfg.actions.light_attack.reach
+        elif commitment == CombatCommitment.HEAVY_ATTACK:
+            reach = self._gcfg.actions.heavy_attack.reach
+        else:
+            return None
+
+        gcfg   = self._gcfg
+        fw, fh = gcfg.fighter.width, gcfg.fighter.height
+        scale  = self._scale
+
+        screen_x = fighter.x // scale
+        render_x = 40 + screen_x - fw // 2
+        y_offset = (fighter.y - self._ground_y_sub) // scale
+        mid_y    = float(arena_y - fh + y_offset + fh // 2)
+
+        if fighter.facing > 0:
+            tip_x = float(render_x + fw + reach)
+        else:
+            tip_x = float(render_x - reach)
+
+        return tip_x, mid_y
+
+    def _update_attack_trail(
+        self,
+        trail: list[tuple[float, float, int]],
+        fighter,
+        arena_y: int,
+    ) -> list[tuple[float, float, int]]:
+        """Age trail points and optionally append the current weapon tip.
+
+        New tip is appended only while the fighter is in attack startup or
+        active frames.  During recovery the trail fades naturally without
+        receiving new points.  Points older than _TRAIL_MAX_AGE are discarded.
+        """
+        _TRAIL_MAX_AGE = 9
+
+        # Age existing points; drop stale ones
+        aged = [(x, y, age + 1) for x, y, age in trail if age < _TRAIL_MAX_AGE]
+
+        tip = self._get_weapon_tip(fighter, arena_y)
+        if tip is not None and fighter.fsm_state in (
+                FSMState.ATTACK_STARTUP, FSMState.ATTACK_ACTIVE):
+            aged.append((tip[0], tip[1], 0))
+
+        return aged
+
+    def _draw_attack_trail(
+        self,
+        screen: pygame.Surface,
+        trail: list[tuple[float, float, int]],
+        commitment,
+    ) -> None:
+        """Draw fading line segments connecting weapon-tip trail points."""
+        if len(trail) < 2:
+            return
+
+        from game.combat.actions import CombatCommitment
+        is_heavy  = (commitment == CombatCommitment.HEAVY_ATTACK)
+        base_r, base_g, base_b = (255, 120, 30) if is_heavy else (255, 240, 80)
+
+        for i in range(len(trail) - 1):
+            x1, y1, age1 = trail[i]
+            x2, y2, age2 = trail[i + 1]
+            frac  = max(0.0, 1.0 - age1 / 9.0)
+            r     = int(base_r * frac)
+            g     = int(base_g * frac)
+            b     = int(base_b * frac)
+            width = max(1, 3 if is_heavy else 2)
+            pygame.draw.line(screen, (r, g, b),
+                             (int(x1), int(y1)), (int(x2), int(y2)), width)
+
+    def _update_draw_rings(self, screen: pygame.Surface) -> None:
+        """Advance and draw all active impact rings."""
+        alive: list[_Ring] = []
+        for ring in self._rings:
+            ring.lifetime -= 1
+            if ring.lifetime <= 0:
+                continue
+            frac   = ring.lifetime / ring.max_lifetime
+            ring.radius += (ring.max_radius - ring.radius) * 0.25
+            alpha  = max(0, int(200 * frac))
+            r = max(0, int(ring.color[0] * frac))
+            g = max(0, int(ring.color[1] * frac))
+            b = max(0, int(ring.color[2] * frac))
+            thickness = max(1, round(3 * frac))
+            surf = pygame.Surface(
+                (int(ring.radius * 2 + 4), int(ring.radius * 2 + 4)),
+                pygame.SRCALPHA,
+            )
+            cx = surf.get_width() // 2
+            cy = surf.get_height() // 2
+            pygame.draw.circle(surf, (r, g, b, alpha), (cx, cy),
+                               max(1, int(ring.radius)), thickness)
+            screen.blit(surf, (int(ring.x - ring.radius - 2),
+                               int(ring.y - ring.radius - 2)))
+            alive.append(ring)
+        self._rings = alive
+
+    def _draw_hitbox_overlay(
+        self,
+        screen: pygame.Surface,
+        state,
+        arena_y: int,
+    ) -> None:
+        """Draw attack hitboxes and fighter hurtboxes for debug inspection.
+
+        Phase 19: toggled by F1.  Uses semi-transparent SRCALPHA surfaces.
+        Attack hitbox = red; hurtbox = cyan.
+        """
+        from game.combat.hitbox import get_attack_hitbox, get_fighter_hurtbox
+
+        scale    = self._scale
+        gcfg     = self._gcfg
+        y_origin = arena_y  # screen y for ground (y_sub = ground_y_sub)
+
+        def sub_rect_to_screen(hbox) -> pygame.Rect:
+            # sub-pixel hitbox → screen pixels
+            sx = 40 + hbox.x_min // scale
+            # y grows downward on screen but upward in sub-pixel space
+            # y_sub=0 is at screen bottom, y_sub=ground_y_sub is at arena_y
+            sy = y_origin + (hbox.y_min - self._ground_y_sub) // scale
+            sw = (hbox.x_max - hbox.x_min) // scale
+            sh = (hbox.y_max - hbox.y_min) // scale
+            return pygame.Rect(sx, sy, max(1, sw), max(1, sh))
+
+        hit_surf  = pygame.Surface(
+            (self._dcfg.window.width, self._dcfg.window.height), pygame.SRCALPHA)
+        hurt_surf = pygame.Surface(
+            (self._dcfg.window.width, self._dcfg.window.height), pygame.SRCALPHA)
+
+        for fighter in (state.player, state.ai):
+            # Hurtbox (cyan, semi-transparent fill)
+            hbox = get_fighter_hurtbox(fighter, gcfg)
+            r    = sub_rect_to_screen(hbox)
+            pygame.draw.rect(hurt_surf, (0, 220, 220, 35), r)
+            pygame.draw.rect(hurt_surf, (0, 220, 220, 160), r, 1)
+
+            # Attack hitbox (red), only during ATTACK_ACTIVE
+            ahbox = get_attack_hitbox(fighter, gcfg)
+            if ahbox is not None:
+                ar = sub_rect_to_screen(ahbox)
+                pygame.draw.rect(hit_surf, (255, 60, 60, 55), ar)
+                pygame.draw.rect(hit_surf, (255, 60, 60, 200), ar, 2)
+
+        screen.blit(hurt_surf, (0, 0))
+        screen.blit(hit_surf,  (0, 0))
+
     def _update_draw_particles(self, screen: pygame.Surface) -> None:
         """Advance and draw all active particles. Called each render frame."""
         alive: list[_Particle] = []
@@ -247,7 +467,11 @@ class Renderer:
         self._particles = alive
 
     def _update_draw_float_texts(self, screen: pygame.Surface) -> None:
-        """Advance and draw all active floating damage texts."""
+        """Advance and draw all active floating texts.
+
+        Phase 19: large=True uses _font (18px) for milestone / guard-break
+        popups; small uses _tiny_font (11px) for damage numbers / MISS.
+        """
         if self._tiny_font is None:
             return
         alive: list[_FloatText] = []
@@ -261,7 +485,9 @@ class Renderer:
             r = ft.color[0]
             g = ft.color[1]
             b = ft.color[2]
-            surf = self._tiny_font.render(ft.text, True, (r, g, b))
+            font  = self._font if (ft.large and self._font is not None) \
+                    else self._tiny_font
+            surf  = font.render(ft.text, True, (r, g, b))
             surf.set_alpha(alpha)
             screen.blit(surf, (int(ft.x) - surf.get_width() // 2, int(ft.y)))
             alive.append(ft)
@@ -296,6 +522,7 @@ class Renderer:
         ai_block_flash: int = 0,
         player_guard_break_flash: int = 0,
         ai_guard_break_flash: int = 0,
+        show_hitboxes: bool = False,
     ) -> None:
         """Render one frame of the game.
 
@@ -322,6 +549,7 @@ class Renderer:
             ai_block_flash:           Display frames for AI block-absorbed-hit flash.
             player_guard_break_flash: Display frames for player guard break flash.
             ai_guard_break_flash:     Display frames for AI guard break flash.
+            show_hitboxes:            If True, draw hitbox/hurtbox debug overlay.
         """
         if self._screen is None:
             return
@@ -335,6 +563,14 @@ class Renderer:
         screen.fill(colors.background)
         arena_render_y = self._arena_y()
         self._draw_arena(screen, arena_render_y)
+
+        # ------------------------------------------------------------------
+        # Phase 19: update attack trails (before drawing fighters)
+        # ------------------------------------------------------------------
+        self._player_trail = self._update_attack_trail(
+            self._player_trail, state.player, arena_render_y)
+        self._ai_trail = self._update_attack_trail(
+            self._ai_trail, state.ai, arena_render_y)
 
         # ------------------------------------------------------------------
         # Fighters
@@ -351,6 +587,20 @@ class Renderer:
                            guard_break_flash=ai_guard_break_flash)
 
         # ------------------------------------------------------------------
+        # Phase 19: attack trails (drawn after fighters, before HUD)
+        # ------------------------------------------------------------------
+        self._draw_attack_trail(screen, self._player_trail,
+                                state.player.active_commitment)
+        self._draw_attack_trail(screen, self._ai_trail,
+                                state.ai.active_commitment)
+
+        # ------------------------------------------------------------------
+        # Phase 19: hitbox debug overlay (drawn after fighters)
+        # ------------------------------------------------------------------
+        if show_hitboxes:
+            self._draw_hitbox_overlay(screen, state, arena_render_y)
+
+        # ------------------------------------------------------------------
         # HUD
         # ------------------------------------------------------------------
         self._draw_hud(screen, state,
@@ -361,10 +611,16 @@ class Renderer:
                        max_guard=max_guard)
 
         # ------------------------------------------------------------------
-        # Combo corner display (arcade-style, separate from HUD bars)
+        # Combo corner display (secondary — always visible at 2+)
         # ------------------------------------------------------------------
         self._draw_combo_corner(screen, player_combo, player_combo_flash, align="left")
         self._draw_combo_corner(screen, ai_combo,     ai_combo_flash,     align="right")
+
+        # ------------------------------------------------------------------
+        # Phase 20: Big center combo text (primary, shown at 3+)
+        # ------------------------------------------------------------------
+        self._draw_big_combo(screen, player_combo, ai_combo,
+                             player_combo_flash, ai_combo_flash)
 
         # ------------------------------------------------------------------
         # Match-end overlay
@@ -391,6 +647,11 @@ class Renderer:
         # Phase 15: impact particles (drawn on top, unaffected by shake)
         # ------------------------------------------------------------------
         self._update_draw_particles(screen)
+
+        # ------------------------------------------------------------------
+        # Phase 19: impact rings (on top of particles)
+        # ------------------------------------------------------------------
+        self._update_draw_rings(screen)
 
         # ------------------------------------------------------------------
         # Phase 17: floating damage text (on top of particles)
@@ -697,6 +958,87 @@ class Renderer:
         # Number (×N) and label
         screen.blit(number_surf, (num_x, panel_y + PAD // 2))
         screen.blit(label_surf,  (lbl_x, panel_y + PAD // 2 + number_surf.get_height() + 3))
+
+    def _draw_big_combo(
+        self,
+        screen: pygame.Surface,
+        player_combo: int,
+        ai_combo: int,
+        player_combo_flash: int,
+        ai_combo_flash: int,
+    ) -> None:
+        """Render the primary large combo display centered near the top of the screen.
+
+        Phase 20: shown for the active combo >= 3.  Includes:
+          - Scale-up animation during the first 10 display frames after increment.
+          - Alpha fade-out during the final 15 display frames of persistence.
+          - Subtle background panel for readability.
+        """
+        if self._large_font is None:
+            return
+
+        colors = self._dcfg.colors
+        w_win  = self._dcfg.window.width
+
+        # Choose which combo to feature (higher flash = more recently incremented)
+        if player_combo >= 3 and ai_combo >= 3:
+            if player_combo_flash >= ai_combo_flash:
+                combo, flash = player_combo, player_combo_flash
+            else:
+                combo, flash = ai_combo, ai_combo_flash
+        elif player_combo >= 3:
+            combo, flash = player_combo, player_combo_flash
+        elif ai_combo >= 3:
+            combo, flash = ai_combo, ai_combo_flash
+        else:
+            return
+
+        if flash <= 0:
+            return
+
+        _PERSIST   = 60   # total frames (== _COMBO_FLASH_FRAMES)
+        _FADE_IN   = 10   # scale-pop frames at the start
+        _FADE_OUT  = 15   # alpha-fade frames at the end
+
+        # Alpha: full except during fade-out window
+        alpha = 255 if flash >= _FADE_OUT else int(255 * flash / _FADE_OUT)
+
+        # Scale animation: peak during the first _FADE_IN frames (flash > 50)
+        thresh = _PERSIST - _FADE_IN   # 50
+        if flash > thresh:
+            t = (flash - thresh) / _FADE_IN   # 0..1
+            scale_f = 1.0 + 0.22 * math.sin(t * math.pi)
+        else:
+            scale_f = 1.0
+
+        # Render text surface
+        text = f"\xd7{combo} COMBO"
+        base_surf = self._large_font.render(text, True, colors.accent)
+
+        if abs(scale_f - 1.0) > 0.005:
+            new_w = max(1, int(base_surf.get_width()  * scale_f))
+            new_h = max(1, int(base_surf.get_height() * scale_f))
+            surf  = pygame.transform.scale(base_surf, (new_w, new_h))
+        else:
+            surf = base_surf
+
+        surf = surf.copy()
+        surf.set_alpha(alpha)
+
+        # Background panel (semi-transparent, anchored to text bounds)
+        PAD     = 12
+        panel_w = surf.get_width()  + PAD * 2
+        panel_h = surf.get_height() + PAD
+        y_pos   = 68   # below tier badge / tick counter
+        panel_x = w_win // 2 - panel_w // 2
+
+        panel_alpha = max(0, alpha - 80)
+        p_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        p_surf.fill((10, 8, 22, panel_alpha))
+        screen.blit(p_surf, (panel_x, y_pos - PAD // 2))
+
+        # Text centered
+        screen.blit(surf, (w_win // 2 - surf.get_width() // 2, y_pos))
 
     def _draw_bar(
         self,

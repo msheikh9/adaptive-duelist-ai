@@ -48,6 +48,7 @@ _ACTION_INFO: dict[InputAction, tuple[str, str]] = {
     InputAction.PRESS_JUMP:         ("Jump",            CAT_MOVEMENT),
     InputAction.PRESS_LIGHT_ATTACK: ("Light Attack",    CAT_ATTACKS),
     InputAction.PRESS_HEAVY_ATTACK: ("Heavy Attack",    CAT_ATTACKS),
+    InputAction.PRESS_SHOOT:        ("Charged Shot",    CAT_ATTACKS),
     InputAction.PRESS_DODGE:        ("Dodge Backward",  CAT_DEFENSE),
     InputAction.PRESS_BLOCK:        ("Block",           CAT_DEFENSE),
 }

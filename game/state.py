@@ -97,6 +97,11 @@ class FighterState:
     guard: int = 100
     guard_regen_delay: int = 0
 
+    # Phase 20: ranged weapon
+    charge_ticks: int = 0       # ticks held in CHARGING state this shot
+    shoot_cooldown: int = 0     # ticks until next shot is legal (0 = ready)
+    pending_shot: bool = False  # True the tick the fighter should fire
+
     @property
     def is_free(self) -> bool:
         return self.fsm_state in (FSMState.IDLE, FSMState.MOVING)

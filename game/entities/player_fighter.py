@@ -69,6 +69,18 @@ class PlayerController:
                         fighter.fsm_state = FSMState.IDLE
                         fighter.active_commitment = None
 
+                case InputAction.PRESS_SHOOT:
+                    # Phase 20: begin startup → charging sequence
+                    if attempt_commitment(fighter, CombatCommitment.SHOOT_START, config):
+                        committed = CombatCommitment.SHOOT_START
+
+                case InputAction.RELEASE_SHOOT:
+                    # Phase 20: release while charging → fire the shot
+                    if fighter.fsm_state == FSMState.CHARGING:
+                        fighter.fsm_state = FSMState.SHOOT_ACTIVE
+                        fighter.fsm_frames_remaining = config.actions.shoot.active_frames
+                        fighter.pending_shot = True
+
         # Handle movement from held keys (only if no attack/dodge was committed)
         if committed is None and fighter.is_free:
             if self._holding_left and not self._holding_right:

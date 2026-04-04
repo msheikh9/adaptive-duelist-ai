@@ -27,6 +27,9 @@ class CombatCommitment(Enum):
     BLOCK_RELEASE = 21
     # Phase 15: jump
     JUMP = 30
+    # Phase 20: ranged weapon
+    SHOOT_START   = 40   # player presses E — begin startup + charge
+    SHOOT_INSTANT = 41   # AI shortcut — enter SHOOT_ACTIVE immediately (no charge)
 
 
 # The subset of commitments active in Phase 1.
@@ -59,6 +62,11 @@ class FSMState(Enum):
     JUMP_STARTUP = auto()
     AIRBORNE = auto()
     LANDING = auto()
+    # Phase 20: ranged weapon states
+    SHOOT_STARTUP  = auto()   # brief startup before charging begins
+    CHARGING       = auto()   # hold to accumulate charge (hold E)
+    SHOOT_ACTIVE   = auto()   # projectile fired — brief active window
+    SHOOT_RECOVERY = auto()   # recovery after firing
 
 
 # States where the fighter can accept a new commitment.

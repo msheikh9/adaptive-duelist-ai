@@ -31,6 +31,11 @@ def can_commit(fighter: FighterState, commitment: CombatCommitment,
     if commitment == CombatCommitment.HEAVY_ATTACK and fighter.heavy_cooldown > 0:
         return False
 
+    # Phase 20: shoot cooldown
+    if commitment in (CombatCommitment.SHOOT_START,
+                      CombatCommitment.SHOOT_INSTANT) and fighter.shoot_cooldown > 0:
+        return False
+
     # Check stamina requirements
     stamina_cost = get_stamina_cost(commitment, config)
     if stamina_cost is not None and fighter.stamina < stamina_cost:
@@ -100,6 +105,21 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.BLOCKING
             fighter.fsm_frames_remaining = 0
             fighter.velocity_x = 0
+
+        case CombatCommitment.SHOOT_START:
+            # Player: startup → charging (hold to accumulate)
+            fighter.fsm_state = FSMState.SHOOT_STARTUP
+            fighter.fsm_frames_remaining = config.actions.shoot.startup_frames
+            fighter.velocity_x = 0
+            fighter.charge_ticks = 0
+
+        case CombatCommitment.SHOOT_INSTANT:
+            # AI: skip charge — fire immediately with charge_frac == 0
+            fighter.fsm_state = FSMState.SHOOT_ACTIVE
+            fighter.fsm_frames_remaining = config.actions.shoot.active_frames
+            fighter.velocity_x = 0
+            fighter.charge_ticks = 0
+            fighter.pending_shot = True
 
 
 def stop_moving(fighter: FighterState) -> None:
@@ -180,6 +200,15 @@ def tick_heavy_cooldown(fighter: FighterState) -> None:
         fighter.heavy_cooldown -= 1
 
 
+def tick_shoot_cooldown(fighter: FighterState) -> None:
+    """Decrement the inter-shot cooldown by one tick.
+
+    Called every SIMULATE tick regardless of FSM state.
+    """
+    if fighter.shoot_cooldown > 0:
+        fighter.shoot_cooldown -= 1
+
+
 def _get_attack_config(commitment: CombatCommitment, config: GameConfig):
     """Get the AttackActionConfig for an attack commitment."""
     if commitment == CombatCommitment.LIGHT_ATTACK:
@@ -199,7 +228,7 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
     state = fighter.fsm_state
 
     if state in (FSMState.IDLE, FSMState.MOVING, FSMState.KO, FSMState.AIRBORNE,
-                 FSMState.BLOCKING):
+                 FSMState.BLOCKING, FSMState.CHARGING):
         return
 
     if fighter.fsm_frames_remaining > 0:
@@ -264,3 +293,18 @@ def tick_fsm(fighter: FighterState, config: GameConfig) -> None:
         case FSMState.PARRY_STUNNED:
             fighter.fsm_state = FSMState.IDLE
             fighter.fsm_frames_remaining = 0
+
+        case FSMState.SHOOT_STARTUP:
+            # Startup complete → enter CHARGING (hold-to-charge; no frame countdown)
+            fighter.fsm_state = FSMState.CHARGING
+            fighter.fsm_frames_remaining = 0
+            fighter.charge_ticks = 0
+
+        case FSMState.SHOOT_ACTIVE:
+            fighter.fsm_state = FSMState.SHOOT_RECOVERY
+            fighter.fsm_frames_remaining = config.actions.shoot.recovery_frames
+
+        case FSMState.SHOOT_RECOVERY:
+            fighter.fsm_state = FSMState.IDLE
+            fighter.fsm_frames_remaining = 0
+            fighter.active_commitment = None
