@@ -17,7 +17,7 @@ from game.input.input_actions import InputAction
 
 class TestInputAction:
     def test_all_members_exist(self):
-        assert len(InputAction) == 10  # Phase 15: +PRESS_JUMP
+        assert len(InputAction) == 12  # Phase 20: +PRESS_SHOOT, RELEASE_SHOOT
         assert InputAction.PRESS_LEFT is not None
         assert InputAction.PRESS_RIGHT is not None
         assert InputAction.RELEASE_LEFT is not None

@@ -1,52 +1,143 @@
 # Adaptive Duelist AI
 
-A 1v1 combat sandbox where an AI opponent learns your playstyle, predicts your next move, and adapts its strategy across matches — all running locally.
+A 1v1 combat sandbox where an AI opponent learns your playstyle, predicts your next move, and adapts its strategy — all running locally with a full ML training pipeline and REST API.
+
+---
+
+## Why This Project Is Interesting
+
+Most "adaptive AI" in games is scripted difficulty scaling. This one is different:
+
+- **Real machine learning in the game loop.** A Random Forest ensemble (Markov + sklearn) predicts your next combat commitment every tick. Prediction confidence drives tactical mode selection — the AI doesn't just react, it tries to anticipate.
+- **Full self-contained pipeline.** The same project that runs the game also handles data collection, model training, holdout evaluation, baseline snapshots, regression detection, and model promotion — all from the CLI.
+- **Three auditable tiers.** Swap between a random baseline (T0), Markov-only prediction (T1), and the full adaptive system (T2) at the title screen. Useful for isolating how much each layer contributes.
+- **Deterministic by seed.** Every match is replayable. Replay files record per-tick checksums; a replay audit tool verifies bit-for-bit consistency.
+- **1 033 passing tests.** Unit tests down to individual FSM transitions and stamina accumulator math. Integration tests covering full headless match runs, training pipelines, and API endpoints.
+- **Sub-pixel integer physics.** No floating-point position math in the simulation. Positions are stored as `pixels × 100`; physics is exact and reproducible.
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [AI Tier System](#ai-tier-system)
-4. [Session Adaptation](#session-adaptation)
-5. [Requirements](#requirements)
-6. [Setup](#setup)
-7. [Running the Game](#running-the-game)
-8. [How to Play](#how-to-play)
-9. [Controls](#controls)
-10. [Local API & Dashboard](#local-api--dashboard)
-11. [CLI Tools](#cli-tools)
-12. [Training Pipeline](#training-pipeline)
-13. [Evaluation & Regression Gates](#evaluation--regression-gates)
-14. [Database Maintenance](#database-maintenance)
-15. [Project Structure](#project-structure)
-16. [Contributing](#contributing)
+1. [Quick Start](#quick-start)
+2. [Controls](#controls)
+3. [Features](#features)
+4. [AI Tier System](#ai-tier-system)
+5. [Session Adaptation](#session-adaptation)
+6. [Local API & Dashboard](#local-api--dashboard)
+7. [CLI Tools](#cli-tools)
+8. [Training Pipeline](#training-pipeline)
+9. [Evaluation & Regression Gates](#evaluation--regression-gates)
+10. [Database Maintenance](#database-maintenance)
+11. [Project Architecture](#project-architecture)
+12. [Roadmap / Future Ideas](#roadmap--future-ideas)
+13. [Contributing](#contributing)
 
 ---
 
-## Overview
+## Quick Start
 
-Adaptive Duelist AI is a headless-capable Python combat simulation with a layered AI system. The AI builds a persistent behavioral profile of the human player, uses a Markov/sklearn ensemble to predict the player's next commitment, and selects a tactical mode (exploit, bait, defend, probe, punish) via weighted scoring. Across matches within a session, it further adapts via a lightweight in-process session memory without any retraining.
+```bash
+# 1. Clone and create a virtual environment
+git clone https://github.com/mutwalli/adaptive-duelist-ai.git
+cd adaptive-duelist-ai
+python3 -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 
-**Key properties:**
-- Fully deterministic by seed — every match is replayable
-- No network calls — runs entirely on `localhost`
-- Modular tier system: swap between random (T0), Markov-only (T1), and fully adaptive (T2)
-- A local REST API + single-page dashboard for observability and control
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run the game
+python3 main.py
+
+# 4. Run the local API + dashboard (separate terminal)
+python3 scripts/run_api.py
+# then open http://localhost:8000/ui/
+
+# 5. Run all tests
+python3 -m pytest
+```
+
+> **Python 3.11+ required.**  
+> Core runtime dependencies: `pygame`, `numpy`, `pandas`, `scikit-learn`, `pyyaml`, `fastapi`, `uvicorn`, `httpx`.
 
 ---
 
-## Architecture
+## Controls
 
-The AI operates through four distinct layers:
+<!-- Screenshot placeholder: docs/images/gameplay.png -->
 
-| Layer | Module | Description |
-|-------|--------|-------------|
-| Behavior Modeling | `ai/layers/behavior_model.py` | Builds a persistent player profile from observed combat commitments |
-| Real-Time Prediction | `ai/layers/prediction_engine.py` | Predicts the player's next commitment via a Markov/sklearn ensemble |
-| Tactical Planning | `ai/layers/tactical_planner.py` | Selects strategic modes via weighted scoring |
-| Explainability | `analytics/` | Logs reasoning, surfaces patterns, supports replay inspection |
+| Action | Keys | Notes |
+|--------|------|-------|
+| Move Left | `A` / `←` | |
+| Move Right | `D` / `→` | |
+| Jump | `W` / `↑` | |
+| Light Attack | `J` / `Z` | Fast, low damage |
+| Heavy Attack | `K` / `X` | Slow, high damage; has cooldown |
+| Charged Shot | `E` / `Right Ctrl` | Hold to charge, release to fire |
+| Dodge Backward | `Space` | Has inter-dodge cooldown |
+| Block | `L` / `C` | Hold; has guard meter — repeated blocks can be guard-broken |
+| Controls overlay | `H` | Pauses simulation while open |
+| Restart match | `R` | End screen only |
+| Quit | `Esc` | |
+| Hitbox debug | `F1` | Toggles attack hitbox / hurtbox overlay |
+
+---
+
+## Features
+
+### Combat & Gameplay
+
+- Fixed-timestep simulation at 60 ticks/sec with sub-pixel integer physics (`position = pixels × 100`)
+- Full FSM per fighter: IDLE → ATTACK_STARTUP → ATTACK_ACTIVE → ATTACK_RECOVERY, DODGING, HITSTUN, BLOCKING, BLOCKSTUN, PARRY_STUNNED, AIRBORNE, LANDING, EXHAUSTED, KO
+- **Light attack** — fast startup, low damage, no cooldown
+- **Heavy attack** — slow startup, high damage, inter-attack cooldown
+- **Dodge** — invincibility window with inter-dodge cooldown; dodge-avoid detection
+- **Block** — guard meter drains on absorbed hits; guard break → PARRY_STUNNED
+- **Jump** — startup → airborne → landing with gravity physics
+- **Charged ranged weapon** — hold to charge (up to 60 ticks); release fires a projectile; damage scales with charge fraction; block chip-damage on impact
+- Combo counter with center-screen display, scale animation, and combo ring VFX
+- Attack trails, impact rings, floating damage numbers, screen shake, hitstop
+- F1 hitbox debug overlay (red = attack hitbox, cyan = hurtbox)
+
+### Adaptive AI
+
+- **T0 Baseline:** weighted random with seeded RNG — deterministic, good for regression baselines
+- **T1 Markov-only:** real-time commitment prediction + strategy scoring, no learning
+- **T2 Full Adaptive:** Markov/sklearn ensemble + tactical planner + in-session memory
+- Planner modes: `exploit`, `bait`, `defend`, `probe`, `punish`
+- Player archetypes: `AGGRESSIVE`, `DEFENSIVE`, `PATTERNED`, `EVASIVE`, `BALANCED`
+- Shift detection — probes alternate tactics when player patterns change
+- Configurable softmax temperature, exploration budget, and staleness thresholds
+
+### Training Pipeline
+
+- Scripted self-play runner (profiles: `RANDOM`, `AGGRESSIVE`, `DEFENSIVE`, `PATTERNED`, `MIXED`)
+- Curriculum trainer — allocates self-play matches toward the AI's weakest zones
+- Sklearn Random Forest training with configurable holdout split
+- Train-and-promote pipeline with exit codes suitable for CI automation
+
+### Evaluation & Regression Gates
+
+- Headless evaluation harness (configurable tier, seed range, match count)
+- Frozen JSON baseline snapshots (win rate, prediction accuracy, damage, latency)
+- Regression detection with pass/fail exit codes (`0` = pass, `1` = regression, `2` = insufficient data)
+- Per-tick performance profiler and repeatable benchmark suite
+
+### Local API & Dashboard
+
+- FastAPI REST API at `http://localhost:8000`
+- Single-page dashboard at `http://localhost:8000/ui/`
+- Endpoints for match data, training, model registry, evaluation, and explainability reports
+- Database path overrideable via `ADAPTIVE_DUELIST_DB` environment variable
+
+### UX & Readability
+
+- Title screen with live AI tier selector
+- In-game controls overlay (H key, pauses simulation)
+- Persistent combo counter with ×N scale-pop animation (≥3 hit streak)
+- Guard meter bar per fighter (teal → orange-red → broken)
+- Dodge and heavy attack cooldown indicator pips in the HUD
+- FSM-state tinting per fighter state
 
 ---
 
@@ -55,101 +146,36 @@ The AI operates through four distinct layers:
 | Tier | Name | Behavior |
 |------|------|----------|
 | T0 | Baseline | Random AI — no planner, no prediction |
-| T1 | Markov-only | Prediction + strategy scoring, no memory updates |
-| T2 | Full Adaptive | Full planner with memory, outcome tracking, session adaptation, shift detection |
+| T1 | Markov-only | Prediction + strategy scoring; profile not updated mid-session |
+| T2 | Full Adaptive | Markov/sklearn ensemble + memory + session adaptation + shift detection |
+
+Select the tier at the title screen using `←` / `→`, then press **Space** or **Enter**.
 
 ---
 
 ## Session Adaptation
 
-The AI adapts its tactical strategy across matches **within a session** without retraining. After each match, per-mode outcomes are recorded in a `SessionMemory` with exponential decay — recent matches carry more weight. A player archetype is inferred from the behavioral profile and used to bias mode selection toward strategies effective against that archetype.
+At T2, the AI adapts its tactical mode selection *across matches within a session* without retraining. After each match, per-mode outcomes are recorded in a `SessionMemory` with exponential decay (configurable via `config/ai_config.yaml`). A player archetype is inferred from the persistent behavioral profile and used to bias mode selection.
 
 **Archetypes:** `AGGRESSIVE`, `DEFENSIVE`, `PATTERNED`, `EVASIVE`, `BALANCED`
 
-Session memory is in-process only (not persisted to the database). It resets when the game restarts. Configuration is in `config/ai_config.yaml` under `session_adaptation` and `archetype_mode_alignment`.
+Session memory is in-process only — it resets when the game restarts.
 
 ```bash
-# View the current player archetype and session stats
+# View current archetype and session stats
 python3 scripts/cli.py session-status
 ```
 
 ---
 
-## Requirements
-
-- Python 3.11+
-- See `requirements.txt` for all dependencies
-
-Core dependencies: `pygame`, `numpy`, `pandas`, `scikit-learn`, `pyyaml`, `fastapi`, `uvicorn`, `httpx`
-
----
-
-## Setup
-
-```bash
-python -m venv venv
-source venv/bin/activate      # macOS/Linux
-# venv\Scripts\activate.bat   # Windows
-
-pip install -r requirements.txt
-```
-
----
-
-## Running the Game
-
-```bash
-python main.py
-# or
-python3 scripts/cli.py play
-```
-
----
-
-## How to Play
-
-1. **Launch the game** — a title / controls screen is shown. Review the bindings, then press **Space** or **Enter** to start.
-2. **Fight** — you are the blue fighter (left). The red fighter is the AI. Deplete the AI's HP to win.
-3. **After the match** — press **R** to restart or **Esc** to quit.
-4. **Help at any time** — press **H** during a match (or on the end screen) to open the controls overlay. The match pauses while the overlay is open. Press **H** again (or **Esc**) to close it.
-
-The AI gets smarter the longer you play. It builds a behavioral profile from your moves and adapts its tactics across matches within a session.
-
----
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `A` / `←` | Move Left |
-| `D` / `→` | Move Right |
-| `J` / `Z` | Light Attack (fast, low damage) |
-| `K` / `X` | Heavy Attack (slow, high damage) |
-| `Space` | Dodge Backward |
-| `L` / `C` | Block |
-| `H` | Open / close controls overlay |
-| `R` | Restart match (end screen) |
-| `Esc` | Quit (or close help overlay) |
-
-The controls overlay is also shown on the title screen before each session.
-
----
-
 ## Local API & Dashboard
-
-A local FastAPI server exposes the full backend over HTTP. A single-page dashboard is served at `http://localhost:8000/ui/`.
-
-**Start the server:**
 
 ```bash
 python3 scripts/run_api.py
-# or
-python3 scripts/cli.py api
+# Options: --host, --port, --reload (dev mode)
 ```
 
-Options: `--host`, `--port`, `--reload` (dev mode).
-
-**Endpoints:**
+<!-- Screenshot placeholder: docs/images/dashboard.png -->
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -160,20 +186,16 @@ Options: `--host`, `--port`, `--reload` (dev mode).
 | POST | `/api/matches/evaluate` | Run a batch evaluation |
 | GET | `/api/matches/recent` | List recent matches |
 | GET | `/api/matches/{id}/report` | Full explainability report for a match |
-| GET | `/api/training/status` | Retrain threshold and delta |
+| GET | `/api/training/status` | Retrain threshold and data delta |
 | POST | `/api/training/run` | Run training pipeline |
 | POST | `/api/training/curriculum` | Run curriculum-driven training cycle |
 | GET | `/api/models/status` | Model registry |
 | POST | `/api/models/baseline` | Create evaluation baseline |
 | POST | `/api/models/check-regression` | Run regression check vs baseline |
 
-The database path can be overridden via the `ADAPTIVE_DUELIST_DB` environment variable — useful for isolated test environments.
-
 ---
 
 ## CLI Tools
-
-All tools are accessible via the unified CLI:
 
 ```bash
 python3 scripts/cli.py <command> [args...]
@@ -230,11 +252,11 @@ python3 scripts/cli.py train-promote --auto-promote
 python3 scripts/cli.py train-promote --auto-promote --source-filter human
 ```
 
-**Exit codes** for `train_and_promote.py`: `0` = promoted / not needed, `1` = regression detected (not promoted), `2` = insufficient data.
+Exit codes for `train_and_promote.py`: `0` = promoted / not needed, `1` = regression detected, `2` = insufficient data.
 
 ### Curriculum Training
 
-The curriculum system allocates self-play matches toward the player's weakest areas using a greedy interleaved strategy:
+Allocates self-play matches toward the player's weakest areas using a greedy interleaved strategy:
 
 ```bash
 python3 scripts/cli.py curriculum --matches 50 --auto-promote
@@ -251,11 +273,11 @@ python3 scripts/cli.py evaluate --tier 2 --matches 50 --seed 0
 # Create a baseline snapshot
 python3 scripts/cli.py create-baseline --tier 2 --matches 50 --tag v1.0
 
-# Check for regressions (exit 0=pass, 1=fail)
+# Check for regressions (exit 0 = pass, 1 = fail)
 python3 scripts/cli.py check-regression --tier 2 --matches 50
 ```
 
-Baselines are frozen JSON snapshots stored in `baselines/`. Regression thresholds are configured in `config/eval_config.yaml`.
+Baselines are frozen JSON snapshots committed to `baselines/`. Regression thresholds are configured in `config/eval_config.yaml`.
 
 ### Benchmark Workflow
 
@@ -296,35 +318,61 @@ python3 scripts/cli.py db vacuum
 
 ---
 
-## Project Structure
+## Project Architecture
 
 ```
-config/          Configuration files and loader
-game/            Game engine, entities, combat mechanics
-ai/              AI layers, models, training pipeline
-  layers/        Behavior model, prediction engine, tactical planner
-  models/        Markov, sklearn, ensemble predictors
-  strategy/      Strategy selector, action resolver, planner memory
-  features/      Feature extraction for ML
-  training/      Dataset builder, model trainer, self-play runner, curriculum
-  profile/       Player profile, archetype classifier
-api/             FastAPI application (routes, schemas, dependencies)
-ui/              Single-page dashboard (HTML/JS/CSS) + Pygame rendering
-data/            Logging, database, serialization, migrations
-evaluation/      Evaluation harness, regression detection, baselines
-baselines/       Frozen evaluation snapshots for regression checks
-replay/          Deterministic replay system
-analytics/       Post-match analysis and explainability
-rendering/       Pygame rendering
-scripts/         CLI tools, benchmarks, profiling, maintenance
-tests/           Unit and integration tests
+adaptive-duelist-ai/
+├── main.py               Entry point — launches the game
+├── config/               YAML configs + typed dataclass loader (GameConfig, AIConfig, DisplayConfig)
+├── game/                 Simulation core
+│   ├── engine.py         Main loop, match lifecycle, tick orchestration
+│   ├── combat/           FSM, state machine, physics, collision, damage, guard, projectiles
+│   ├── entities/         Player controller, AI baseline controller, fighter helpers
+│   ├── input/            Input actions (Vocab A), input map, keybind registry
+│   └── state.py          Authoritative mutable simulation state with phase-lock enforcement
+├── ai/                   AI pipeline
+│   ├── layers/           Behavior model, prediction engine, tactical planner
+│   ├── models/           Markov, sklearn, and ensemble predictors
+│   ├── strategy/         Strategy selector, action resolver, planner memory
+│   ├── features/         Feature extraction for ML
+│   ├── training/         Dataset builder, model trainer, self-play runner, curriculum
+│   └── profile/          Player profile persistence, archetype classifier
+├── api/                  FastAPI application (routes, schemas, dependency injection)
+├── ui/                   Dashboard HTML/JS/CSS (served by FastAPI) + Pygame renderer
+├── rendering/            Pygame renderer (particles, rings, trails, HUD, overlays)
+├── data/                 SQLite DB wrapper, migrations, event logging, tick snapshots
+├── evaluation/           Evaluation harness, regression detector, baseline management
+├── replay/               Deterministic replay recorder and verifier
+├── analytics/            Post-match explainability, pattern mining, planner metrics
+├── baselines/            Committed frozen baseline JSON snapshots
+├── scripts/              CLI tools, benchmarks, performance profiler, maintenance scripts
+├── tests/                1 033-test suite (unit + integration)
+└── docs/                 Screenshots and supplementary documentation
 ```
+
+**Key design decisions:**
+- **Two-vocabulary input model** — `InputAction` (raw key events) never crosses into the simulation; fighters only see `CombatCommitment` (resolved intent). The AI operates entirely in Vocab B.
+- **Phase-locked simulation state** — `SimulationState` mutations are only allowed during the `SIMULATE` phase. Debug mode enforces this at runtime via `PhaseLockError`.
+- **Headless-capable by default** — pass `headless=True` to `Engine` to run without pygame display. All tests use this path.
+
+---
+
+## Roadmap / Future Ideas
+
+These are directions worth exploring — not promises or committed work:
+
+- **Online learning** — update the Markov model within a session without a full retrain cycle
+- **Networked play** — separate the simulation tick loop from the renderer so both sides can run on separate hosts
+- **Richer action space** — air attacks, attack cancels, specials; each adds a new commitment type that the prediction layer can model
+- **ONNX export** — export the trained RF classifier to ONNX for faster inference or mobile targets
+- **Replay UI** — scrubable web-based replay viewer using the existing replay file format and dashboard infrastructure
+- **Human benchmark mode** — structured sessions with automated skill assessment across multiple matches
 
 ---
 
 ## Contributing
 
-1. Run the full test suite before opening a PR: `pytest`
+1. Run the full test suite before opening a PR: `python3 -m pytest`
 2. All new functionality must include unit tests
 3. Evaluation gates (`check-regression`) must pass before merging to `main`
 4. Session memory and archetype classification are in-process only — do not persist them to the database

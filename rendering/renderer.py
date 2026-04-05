@@ -196,6 +196,19 @@ class Renderer:
             color    = (160, 120, 240)  # accent purple (unused, n=0)
             ring_r   = 34
             ring_col = (160, 120, 240)  # accent purple ring
+        elif kind == "muzzle_flash":
+            # Phase 20: brief bright burst at shot origin
+            n, speed, lifetime = 6, 4.5, 8
+            color    = (200, 240, 255)  # cold blue-white
+            ring_r   = 18
+            ring_col = (160, 210, 255)
+            screen_y = arena_y - fh // 2 + y_offset  # mid-body height
+        elif kind == "projectile_hit":
+            # Phase 20: impact at projectile contact point
+            n, speed, lifetime = 10, 5.0, 14
+            color    = (160, 210, 255)  # icy blue
+            ring_r   = 28
+            ring_col = (120, 180, 255)
         else:  # "light"
             n, speed, lifetime = 8, 3.5, 11   # Phase 19: slightly more
             color = (255, 255, 160)  # pale yellow
@@ -523,6 +536,7 @@ class Renderer:
         player_guard_break_flash: int = 0,
         ai_guard_break_flash: int = 0,
         show_hitboxes: bool = False,
+        projectiles: list | None = None,
     ) -> None:
         """Render one frame of the game.
 
@@ -599,6 +613,13 @@ class Renderer:
         # ------------------------------------------------------------------
         if show_hitboxes:
             self._draw_hitbox_overlay(screen, state, arena_render_y)
+
+        # ------------------------------------------------------------------
+        # Phase 20: projectiles + charge bar
+        # ------------------------------------------------------------------
+        if projectiles:
+            self._draw_projectiles(screen, projectiles, arena_render_y)
+        self._draw_charge_bar(screen, state, arena_render_y)
 
         # ------------------------------------------------------------------
         # HUD
@@ -1088,6 +1109,98 @@ class Renderer:
     # Fighter
     # ------------------------------------------------------------------
 
+    def _draw_projectiles(
+        self,
+        screen: pygame.Surface,
+        projectiles: list,
+        arena_y: int,
+    ) -> None:
+        """Draw all active projectiles as glowing orbs.
+
+        Phase 20: size and brightness scale with charge_frac (0→1).
+        """
+        if not projectiles:
+            return
+
+        scale = self._scale
+        ground_y_sub = self._ground_y_sub
+        fh = self._gcfg.fighter.height
+
+        for proj in projectiles:
+            if not proj.active:
+                continue
+
+            px = 40 + proj.x // scale
+            y_offset = (proj.y - ground_y_sub) // scale
+            py = arena_y - fh // 2 + y_offset
+
+            # Size: 5px (uncharged) → 12px (full charge)
+            radius = max(5, round(5 + proj.charge_frac * 7))
+
+            # Colour: white core → icy blue outer
+            outer_alpha = max(100, min(220, 100 + int(proj.charge_frac * 120)))
+            inner_col   = (220, 240, 255)
+            outer_col   = (80, 160, 255)
+
+            # Outer glow (SRCALPHA circle)
+            glow_r = radius + 6
+            glow_surf = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(
+                glow_surf,
+                (*outer_col, outer_alpha // 2),
+                (glow_r, glow_r),
+                glow_r,
+            )
+            screen.blit(glow_surf, (px - glow_r, py - glow_r))
+
+            # Core
+            pygame.draw.circle(screen, outer_col, (px, py), radius)
+            pygame.draw.circle(screen, inner_col, (px, py), max(2, radius - 3))
+
+    def _draw_charge_bar(
+        self,
+        screen: pygame.Surface,
+        state,
+        arena_y: int,
+    ) -> None:
+        """Draw a charge progress bar above a fighter in CHARGING state.
+
+        Phase 20: small 40×4 bar centred above the fighter's head showing
+        how full the current charge is.
+        """
+        gcfg  = self._gcfg
+        scale = self._scale
+        fw, fh = gcfg.fighter.width, gcfg.fighter.height
+        max_charge = gcfg.actions.shoot.max_charge_frames
+
+        for fighter in (state.player, state.ai):
+            if fighter.fsm_state != FSMState.CHARGING:
+                continue
+            if max_charge <= 0:
+                continue
+
+            frac = min(1.0, fighter.charge_ticks / max_charge)
+            screen_x  = fighter.x // scale
+            render_x  = 40 + screen_x - fw // 2
+            y_offset  = (fighter.y - self._ground_y_sub) // scale
+            render_y  = arena_y - fh + y_offset  # top of fighter
+
+            bar_w  = fw
+            bar_h  = 4
+            bar_x  = render_x
+            bar_y  = render_y - 8
+
+            # Background
+            pygame.draw.rect(screen, (30, 30, 40), (bar_x, bar_y, bar_w, bar_h))
+            # Fill (cyan → white as charge increases)
+            fill_w = max(1, round(bar_w * frac))
+            r = min(255, 80 + int(frac * 175))
+            g = min(255, 160 + int(frac * 95))
+            b = 255
+            pygame.draw.rect(screen, (r, g, b), (bar_x, bar_y, fill_w, bar_h))
+            # Border
+            pygame.draw.rect(screen, (80, 160, 255), (bar_x, bar_y, bar_w, bar_h), 1)
+
     def _draw_fighter(
         self,
         screen: pygame.Surface,
@@ -1156,6 +1269,15 @@ class Renderer:
             draw_color = tuple(max(0, c - 60) for c in base_color)
         elif state == FSMState.KO:
             draw_color = (70, 70, 75)
+        elif state == FSMState.CHARGING:
+            # Phase 20: charging — cyan-white glow that pulses
+            draw_color = (140, 220, 255)
+        elif state == FSMState.SHOOT_STARTUP:
+            draw_color = tuple(min(255, int(c * 0.7 + 50)) for c in base_color)
+        elif state == FSMState.SHOOT_ACTIVE:
+            draw_color = (200, 240, 255)  # bright ice-blue flash
+        elif state == FSMState.SHOOT_RECOVERY:
+            draw_color = tuple(max(0, c - 30) for c in base_color)
         else:
             draw_color = base_color
 

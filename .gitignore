@@ -25,12 +25,22 @@ Thumbs.db
 
 # Project runtime data
 db/*.db
+db/*.db-shm
+db/*.db-wal
 models/*.pkl
 models/*.joblib
 models/registry.json
 replays/*.replay
 logs/*.log
 logs/*.json
+
+# Benchmark / profiler output
+benchmark_results.json
+results.csv
+
+# Test / CI artifacts
+.pytest_cache/
+junit*.xml
 
 # Analytics output
 analytics/output/
