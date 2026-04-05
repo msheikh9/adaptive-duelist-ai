@@ -1,6 +1,8 @@
 # Adaptive Duelist AI
 
-A 1v1 combat sandbox where an AI opponent learns your playstyle, predicts your next move, and adapts its strategy — all running locally with a full ML training pipeline and REST API.
+A 1v1 combat sandbox where an AI opponent learns your playstyle, predicts your next move, and adapts its strategy in real time — all running locally with a full ML training pipeline, deterministic replay system, and REST API.
+
+<!-- Screenshot placeholder: docs/images/gameplay-combat.png -->
 
 ---
 
@@ -8,12 +10,12 @@ A 1v1 combat sandbox where an AI opponent learns your playstyle, predicts your n
 
 Most "adaptive AI" in games is scripted difficulty scaling. This one is different:
 
-- **Real machine learning in the game loop.** A Random Forest ensemble (Markov + sklearn) predicts your next combat commitment every tick. Prediction confidence drives tactical mode selection — the AI doesn't just react, it tries to anticipate.
+- **Real machine learning in the game loop.** A Random Forest ensemble (Markov + sklearn) predicts your next combat commitment every tick. Prediction confidence drives tactical mode selection — the AI doesn't just react — it tries to anticipate.
 - **Full self-contained pipeline.** The same project that runs the game also handles data collection, model training, holdout evaluation, baseline snapshots, regression detection, and model promotion — all from the CLI.
-- **Three auditable tiers.** Swap between a random baseline (T0), Markov-only prediction (T1), and the full adaptive system (T2) at the title screen. Useful for isolating how much each layer contributes.
 - **Deterministic by seed.** Every match is replayable. Replay files record per-tick checksums; a replay audit tool verifies bit-for-bit consistency.
-- **1 033 passing tests.** Unit tests down to individual FSM transitions and stamina accumulator math. Integration tests covering full headless match runs, training pipelines, and API endpoints.
+- **Three auditable tiers.** Swap between a random baseline (T0), Markov-only prediction (T1), and the full adaptive system (T2) at the title screen. Useful for isolating how much each layer contributes.
 - **Sub-pixel integer physics.** No floating-point position math in the simulation. Positions are stored as `pixels × 100`; physics is exact and reproducible.
+- **1,033 passing tests.** Unit tests down to individual FSM transitions and stamina accumulator math. Integration tests covering full headless match runs, training pipelines, and API endpoints.
 
 ---
 
@@ -73,13 +75,17 @@ python3 -m pytest
 | Jump | `W` / `↑` | |
 | Light Attack | `J` / `Z` | Fast, low damage |
 | Heavy Attack | `K` / `X` | Slow, high damage; has cooldown |
-| Charged Shot | `E` / `Right Ctrl` | Hold to charge, release to fire |
+| Charged Shot | `E` / `Right Ctrl` | Hold to charge; release to fire projectile |
 | Dodge Backward | `Space` | Has inter-dodge cooldown |
 | Block | `L` / `C` | Hold; has guard meter — repeated blocks can be guard-broken |
 | Controls overlay | `H` | Pauses simulation while open |
 | Restart match | `R` | End screen only |
 | Quit | `Esc` | |
 | Hitbox debug | `F1` | Toggles attack hitbox / hurtbox overlay |
+
+Start on T0 or T1 to learn spacing and timing, then switch to T2 to feel the adaptive planner, session memory, and projectile pressure. Use **H** anytime to pause and review controls.
+
+<!-- Screenshot placeholder: docs/images/controls-overlay.png -->
 
 ---
 
@@ -240,7 +246,7 @@ python3 scripts/cli.py self-play --matches 50 --profiles RANDOM AGGRESSIVE DEFEN
 python3 scripts/cli.py model-status
 ```
 
-Scripted profiles: `RANDOM`, `AGGRESSIVE`, `DEFENSIVE`, `PATTERNED`, `MIXED`. All use only Phase 1 commitments. Self-play data is tagged `source='self_play'` and can be filtered separately from human data.
+Self-play data is tagged `source='self_play'`; use `--source-filter` to separate it from human match data when retraining.
 
 ### Retraining
 
@@ -346,7 +352,7 @@ adaptive-duelist-ai/
 ├── analytics/            Post-match explainability, pattern mining, planner metrics
 ├── baselines/            Committed frozen baseline JSON snapshots
 ├── scripts/              CLI tools, benchmarks, performance profiler, maintenance scripts
-├── tests/                1 033-test suite (unit + integration)
+├── tests/                1,033-test suite (unit + integration)
 └── docs/                 Screenshots and supplementary documentation
 ```
 
