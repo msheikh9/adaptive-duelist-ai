@@ -114,6 +114,9 @@ class TacticalPlanner:
 
         # Delay countdown
         self._delay_remaining: int = 0
+        # T2 remembers when an observed projectile should arrive so it does
+        # not release a perfect guard while the shot is still in flight.
+        self._guard_until_tick: int = -1
 
         # Outcome tracking
         self._last_ai_action: CombatCommitment | None = None
@@ -153,6 +156,7 @@ class TacticalPlanner:
         self._pending_tick = -1
         self._pending_context_tick = -1
         self._delay_remaining = 0
+        self._guard_until_tick = -1
         self._last_ai_action = None
         self._last_ai_action_tick = -1
         self._last_ai_mode = None
@@ -182,8 +186,36 @@ class TacticalPlanner:
         """Called each tick. Returns a commitment if one should fire now."""
         if not ai_state.is_alive:
             return None
+
+        # T2 is intentionally allowed to release guard with perfect timing.
+        # BLOCKING is a locked state, so without this explicit release the AI
+        # would hold guard forever after using it once.
+        if (self._tier == AITier.T2_FULL_ADAPTIVE
+                and ai_state.fsm_state == FSMState.BLOCKING):
+            if (sim.tick_id <= self._guard_until_tick
+                    or self._player_is_immediate_threat(sim.player)):
+                return None
+            ai_state.fsm_state = FSMState.IDLE
+            ai_state.active_commitment = None
+            ai_state.velocity_x = 0
+
         if ai_state.is_locked:
             return None
+
+        # The full-adaptive tier gets a frame-perfect tactical layer before
+        # the learned planner. It reads commitments entered earlier in this
+        # simulation tick, counters startup, punishes recovery, and never
+        # introduces an artificial reaction delay. Lower tiers are unchanged.
+        if self._tier == AITier.T2_FULL_ADAPTIVE:
+            unfair = self._perfect_read_action(ai_state, sim, config)
+            if unfair is not None:
+                output, mode = unfair
+                self._pending = None
+                self._pending_mode = None
+                self._delay_remaining = 0
+                self._memory.record_mode(mode)
+                return self._fire_action(
+                    ai_state, sim, config, output, mode)
 
         # If we have a delayed pending action, count down
         if self._pending is not None and self._delay_remaining > 0:
@@ -201,6 +233,262 @@ class TacticalPlanner:
 
         # Plan a new action
         return self._plan_and_maybe_execute(ai_state, sim, config)
+
+    def _perfect_read_action(
+        self,
+        ai_state: FighterState,
+        sim: SimulationState,
+        config: GameConfig,
+    ) -> tuple[ResolverOutput, TacticalIntent] | None:
+        """Return T2's deterministic, deliberately oppressive action.
+
+        This layer still obeys the same FSM, stamina, cooldown, and damage
+        rules as the player. Its unfair advantage is information and timing:
+        player input is processed first, so T2 can react on the exact tick a
+        commitment begins.
+        """
+        player = sim.player
+        scale = config.simulation.sub_pixel_scale
+        distance = sim.distance_sub()
+        body_width = config.fighter.width * scale
+        light_range = (
+            config.actions.light_attack.reach * scale + body_width
+        )
+        heavy_range = (
+            config.actions.heavy_attack.reach * scale + body_width
+        )
+
+        advance = (
+            CombatCommitment.MOVE_RIGHT
+            if ai_state.facing > 0
+            else CombatCommitment.MOVE_LEFT
+        )
+
+        def choice(
+            commitment: CombatCommitment,
+            mode: TacticalIntent,
+            *tags: str,
+            bias: float = 0.0,
+        ) -> tuple[ResolverOutput, TacticalIntent]:
+            return (
+                ResolverOutput(
+                    commitment=commitment,
+                    positioning_bias=bias,
+                    commit_delay=0,
+                    reason_tags=("perfect_read", *tags),
+                ),
+                mode,
+            )
+
+        # Frame-one defense against melee. Dodge is preferred because it
+        # avoids all damage; guard is the no-cooldown fallback.
+        if player.fsm_state in (FSMState.ATTACK_STARTUP, FSMState.ATTACK_ACTIVE):
+            attack = player.active_commitment
+            attack_range = (
+                heavy_range
+                if attack == CombatCommitment.HEAVY_ATTACK
+                else light_range
+            )
+            if distance <= attack_range:
+                if can_commit(
+                    ai_state, CombatCommitment.DODGE_BACKWARD, config
+                ):
+                    return choice(
+                        CombatCommitment.DODGE_BACKWARD,
+                        TacticalIntent.BAIT_AND_PUNISH,
+                        "frame_one_dodge",
+                        attack.name if attack else "attack",
+                        bias=-1.0,
+                    )
+                return choice(
+                    CombatCommitment.BLOCK_START,
+                    TacticalIntent.DEFENSIVE_RESET,
+                    "instant_guard",
+                    attack.name if attack else "attack",
+                    bias=-1.0,
+                )
+
+            # An out-of-range swing is a free opportunity to shoot without
+            # ever walking into the active hitbox.
+            if can_commit(ai_state, CombatCommitment.SHOOT_INSTANT, config):
+                return choice(
+                    CombatCommitment.SHOOT_INSTANT,
+                    TacticalIntent.PUNISH_RECOVERY,
+                    "zone_whiff",
+                )
+            return choice(
+                (CombatCommitment.MOVE_LEFT
+                 if ai_state.facing > 0
+                 else CombatCommitment.MOVE_RIGHT),
+                TacticalIntent.DEFENSIVE_RESET,
+                "space_whiff",
+                bias=-1.0,
+            )
+
+        # The projectile is spawned after the AI decision in this same tick,
+        # so guarding on SHOOT_ACTIVE is a frame-perfect answer.
+        if player.fsm_state == FSMState.SHOOT_ACTIVE:
+            projectile_speed = max(
+                1, config.actions.shoot.projectile_speed * scale
+            )
+            travel_ticks = (distance + projectile_speed - 1) // projectile_speed
+            self._guard_until_tick = sim.tick_id + travel_ticks + 2
+            return choice(
+                CombatCommitment.BLOCK_START,
+                TacticalIntent.DEFENSIVE_RESET,
+                "projectile_guard",
+                bias=-1.0,
+            )
+
+        # Interrupt slow ranged startup/charge before the shot can come out.
+        if player.fsm_state in (FSMState.SHOOT_STARTUP, FSMState.CHARGING):
+            if distance <= heavy_range and can_commit(
+                ai_state, CombatCommitment.HEAVY_ATTACK, config
+            ):
+                return choice(
+                    CombatCommitment.HEAVY_ATTACK,
+                    TacticalIntent.PUNISH_RECOVERY,
+                    "interrupt_charge",
+                    bias=1.0,
+                )
+            if distance <= light_range:
+                return choice(
+                    CombatCommitment.LIGHT_ATTACK,
+                    TacticalIntent.PUNISH_RECOVERY,
+                    "interrupt_charge",
+                    bias=1.0,
+                )
+            if can_commit(ai_state, CombatCommitment.SHOOT_INSTANT, config):
+                return choice(
+                    CombatCommitment.SHOOT_INSTANT,
+                    TacticalIntent.EXPLOIT_PATTERN,
+                    "outshoot_charge",
+                    bias=0.0,
+                )
+            return choice(
+                advance,
+                TacticalIntent.PRESSURE_STAMINA,
+                "rush_charge",
+                bias=1.0,
+            )
+
+        # Recovery, stun, exhaustion, and landing are guaranteed punish
+        # windows. Pick the highest-damage attack that will reach.
+        punish_states = {
+            FSMState.ATTACK_RECOVERY,
+            FSMState.DODGE_RECOVERY,
+            FSMState.SHOOT_RECOVERY,
+            FSMState.HITSTUN,
+            FSMState.PARRY_STUNNED,
+            FSMState.EXHAUSTED,
+            FSMState.LANDING,
+        }
+        if player.fsm_state in punish_states:
+            if distance <= heavy_range and can_commit(
+                ai_state, CombatCommitment.HEAVY_ATTACK, config
+            ):
+                return choice(
+                    CombatCommitment.HEAVY_ATTACK,
+                    TacticalIntent.PUNISH_RECOVERY,
+                    "max_damage_punish",
+                    player.fsm_state.name,
+                    bias=1.0,
+                )
+            if distance <= light_range:
+                return choice(
+                    CombatCommitment.LIGHT_ATTACK,
+                    TacticalIntent.PUNISH_RECOVERY,
+                    "fast_punish",
+                    player.fsm_state.name,
+                    bias=1.0,
+                )
+            return choice(
+                advance,
+                TacticalIntent.PUNISH_RECOVERY,
+                "run_down_recovery",
+                player.fsm_state.name,
+                bias=1.0,
+            )
+
+        # Blocking loses to repeated heavy guard damage.
+        if player.fsm_state in (FSMState.BLOCKING, FSMState.BLOCKSTUN):
+            if distance <= heavy_range and can_commit(
+                ai_state, CombatCommitment.HEAVY_ATTACK, config
+            ):
+                return choice(
+                    CombatCommitment.HEAVY_ATTACK,
+                    TacticalIntent.PRESSURE_STAMINA,
+                    "guard_break",
+                    bias=1.0,
+                )
+            return choice(
+                advance,
+                TacticalIntent.PRESSURE_STAMINA,
+                "corner_guard",
+                bias=1.0,
+            )
+
+        # Dodge invulnerability does not protect against projectiles in this
+        # combat system, so shoot directly into evasive movement.
+        if player.fsm_state in (
+            FSMState.DODGE_STARTUP,
+            FSMState.DODGING,
+            FSMState.JUMP_STARTUP,
+            FSMState.AIRBORNE,
+        ):
+            if can_commit(ai_state, CombatCommitment.SHOOT_INSTANT, config):
+                return choice(
+                    CombatCommitment.SHOOT_INSTANT,
+                    TacticalIntent.EXPLOIT_PATTERN,
+                    "catch_mobility",
+                    player.fsm_state.name,
+                )
+            return choice(
+                advance,
+                TacticalIntent.PRESSURE_STAMINA,
+                "track_mobility",
+                bias=1.0,
+            )
+
+        # Neutral is relentless: jab in light range, use the larger heavy
+        # hitbox at its edge, and zone with instant shots from farther out.
+        if distance <= light_range:
+            return choice(
+                CombatCommitment.LIGHT_ATTACK,
+                TacticalIntent.PRESSURE_STAMINA,
+                "zero_gap_pressure",
+                bias=1.0,
+            )
+        if distance <= heavy_range and can_commit(
+            ai_state, CombatCommitment.HEAVY_ATTACK, config
+        ):
+            return choice(
+                CombatCommitment.HEAVY_ATTACK,
+                TacticalIntent.PRESSURE_STAMINA,
+                "max_range_heavy",
+                bias=1.0,
+            )
+        if can_commit(ai_state, CombatCommitment.SHOOT_INSTANT, config):
+            return choice(
+                CombatCommitment.SHOOT_INSTANT,
+                TacticalIntent.EXPLOIT_PATTERN,
+                "instant_zoning",
+            )
+        return choice(
+            advance,
+            TacticalIntent.PRESSURE_STAMINA,
+            "relentless_advance",
+            bias=1.0,
+        )
+
+    @staticmethod
+    def _player_is_immediate_threat(player: FighterState) -> bool:
+        """Whether T2 should keep holding an already-entered guard."""
+        return player.fsm_state in (
+            FSMState.ATTACK_STARTUP,
+            FSMState.ATTACK_ACTIVE,
+            FSMState.SHOOT_ACTIVE,
+        )
 
     def _plan_and_maybe_execute(
         self,

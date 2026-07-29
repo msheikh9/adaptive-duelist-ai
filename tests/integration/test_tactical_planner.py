@@ -157,6 +157,116 @@ class TestDecisionMaking:
         assert len(commitments) > 0
 
 
+class TestPerfectReadTier:
+    """T2's deliberately unfair frame-perfect tactical overrides."""
+
+    @staticmethod
+    def _start(planner_t2, sim_state):
+        planner, bm, pe = planner_t2
+        bm.on_match_start("m1")
+        pe.on_match_start("m1")
+        planner.on_match_start("m1", "s1", 42)
+        sim_state.set_phase(TickPhase.SIMULATE)
+        return planner
+
+    @staticmethod
+    def _put_in_range(sim_state, distance_px, game_cfg):
+        sim_state.ai.x = sim_state.player.x + (
+            distance_px * game_cfg.simulation.sub_pixel_scale
+        )
+        sim_state.ai.facing = -1
+        sim_state.player.facing = 1
+
+    def test_dodges_attack_on_first_startup_tick(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+        self._put_in_range(sim_state, 100, game_cfg)
+        sim_state.player.fsm_state = FSMState.ATTACK_STARTUP
+        sim_state.player.active_commitment = CombatCommitment.LIGHT_ATTACK
+
+        result = planner.decide(sim_state.ai, sim_state, game_cfg)
+
+        assert result == CombatCommitment.DODGE_BACKWARD
+        assert sim_state.ai.fsm_state == FSMState.DODGE_STARTUP
+
+    def test_instant_guard_when_dodge_is_on_cooldown(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+        self._put_in_range(sim_state, 100, game_cfg)
+        sim_state.ai.dodge_cooldown = 20
+        sim_state.player.fsm_state = FSMState.ATTACK_STARTUP
+        sim_state.player.active_commitment = CombatCommitment.LIGHT_ATTACK
+
+        result = planner.decide(sim_state.ai, sim_state, game_cfg)
+
+        assert result == CombatCommitment.BLOCK_START
+        assert sim_state.ai.fsm_state == FSMState.BLOCKING
+
+    def test_uses_heavy_for_guaranteed_recovery_punish(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+        self._put_in_range(sim_state, 160, game_cfg)
+        sim_state.player.fsm_state = FSMState.ATTACK_RECOVERY
+        sim_state.player.active_commitment = CombatCommitment.HEAVY_ATTACK
+
+        result = planner.decide(sim_state.ai, sim_state, game_cfg)
+
+        assert result == CombatCommitment.HEAVY_ATTACK
+        assert sim_state.ai.fsm_state == FSMState.ATTACK_STARTUP
+
+    def test_releases_guard_and_immediately_punishes_recovery(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+        self._put_in_range(sim_state, 100, game_cfg)
+        sim_state.ai.fsm_state = FSMState.BLOCKING
+        sim_state.ai.active_commitment = CombatCommitment.BLOCK_START
+        sim_state.player.fsm_state = FSMState.ATTACK_RECOVERY
+        sim_state.player.active_commitment = CombatCommitment.LIGHT_ATTACK
+
+        result = planner.decide(sim_state.ai, sim_state, game_cfg)
+
+        assert result == CombatCommitment.HEAVY_ATTACK
+        assert sim_state.ai.fsm_state == FSMState.ATTACK_STARTUP
+
+    def test_uses_instant_projectile_at_long_range(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+
+        result = planner.decide(sim_state.ai, sim_state, game_cfg)
+
+        assert result == CombatCommitment.SHOOT_INSTANT
+        assert sim_state.ai.pending_shot is True
+
+    def test_holds_guard_until_observed_projectile_arrives(
+        self, planner_t2, sim_state, configs,
+    ):
+        game_cfg, _ = configs
+        planner = self._start(planner_t2, sim_state)
+        sim_state.player.fsm_state = FSMState.SHOOT_ACTIVE
+        sim_state.player.active_commitment = CombatCommitment.SHOOT_START
+
+        assert planner.decide(
+            sim_state.ai, sim_state, game_cfg
+        ) == CombatCommitment.BLOCK_START
+
+        # The shooter enters recovery, but the projectile is still crossing
+        # the arena. T2 must not drop its guard early.
+        sim_state.tick_id += 1
+        sim_state.player.fsm_state = FSMState.SHOOT_RECOVERY
+        assert planner.decide(sim_state.ai, sim_state, game_cfg) is None
+        assert sim_state.ai.fsm_state == FSMState.BLOCKING
+
+
 class TestOutcomeResolution:
     def test_player_commit_updates_prediction_tracking(self, planner_t2, sim_state, configs):
         planner, bm, pe = planner_t2
