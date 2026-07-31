@@ -54,9 +54,14 @@ def _print_result(result) -> None:
 
     if result.prediction:
         p = result.prediction
-        print(f"\n  Prediction")
+        print(f"\n  Prediction (next player commitment)")
         print(f"    top-1: {p.top1_accuracy:.1%} ({p.top1_correct}/{p.total_predictions})")
         print(f"    top-2: {p.top2_accuracy:.1%} ({p.top2_correct}/{p.total_predictions})")
+        if p.total_predictions:
+            print(f"    majority-class baseline: {p.majority_class_accuracy:.1%} "
+                  f"(always guess {p.majority_class_label}, "
+                  f"{p.n_distinct_labels} distinct labels)")
+            print(f"    lift over majority: {p.lift_over_majority:+.1%}")
 
     if result.planner:
         pl = result.planner

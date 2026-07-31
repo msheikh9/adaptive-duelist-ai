@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
+
+# Scripts are run directly (python3 scripts/model_status.py), so the project root
+# is not on sys.path by default. Every other script in here does this; this one
+# did not, and failed with ModuleNotFoundError: No module named 'config'.
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
 

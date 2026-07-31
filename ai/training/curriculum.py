@@ -105,7 +105,11 @@ def build_curriculum(
             unique_profiles.append(p)
 
     # --- Build allocation ---
+    # _allocate guarantees every profile it returns gets at least one match, so
+    # it may drop profiles when there are fewer matches than profiles. The plan's
+    # profile list has to agree with the allocation it reports.
     allocation = _allocate(unique_profiles, total_matches, weakness)
+    unique_profiles = [p for p in unique_profiles if p.value in allocation]
 
     return CurriculumPlan(
         profiles=unique_profiles,
@@ -123,9 +127,13 @@ def _allocate(
 
     Applies a boost factor for profiles directly targeting detected weaknesses,
     then floors each to at least 1 match, and normalises to sum exactly.
-    """
-    n = len(profiles)
 
+    Every returned profile gets at least one match. When there are more profiles
+    than matches that is impossible to honour for all of them, so the
+    lowest-weight profiles are dropped — previously this combination tripped the
+    sum assertion, because the per-profile floor of 1 pushed the total above
+    total_matches and the remainder pass refused to decrement below 1.
+    """
     # Compute raw weights — boost profiles that map to known weaknesses
     weights: dict[str, float] = {}
     for p in profiles:
@@ -143,6 +151,15 @@ def _allocate(
         m in _DEFENSIVE_MODES for m in weakness.weak_tactical_modes
     ):
         weights[ScriptedProfile.DEFENSIVE.value] *= 1.5
+
+    # Fewer matches than profiles: keep the highest-weight ones, tie-broken by
+    # name for determinism, so each survivor can still get its minimum of one.
+    if total_matches < len(profiles):
+        profiles = sorted(
+            profiles, key=lambda p: (-weights[p.value], p.value)
+        )[:total_matches]
+        kept = {p.value for p in profiles}
+        weights = {k: v for k, v in weights.items() if k in kept}
 
     total_weight = sum(weights.values())
 

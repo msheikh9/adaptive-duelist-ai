@@ -9,7 +9,11 @@ import enum
 import random
 from typing import TYPE_CHECKING
 
-from game.combat.actions import CombatCommitment, PHASE_1_COMMITMENTS
+from game.combat.actions import (
+    CombatCommitment,
+    PHASE_1_COMMITMENTS,
+    PHASE_1_COMMITMENTS_ORDERED,
+)
 from game.combat.state_machine import can_commit
 from game.entities.fighter import attempt_commitment
 
@@ -115,7 +119,8 @@ class ScriptedOpponent:
         self._ticks_until_decision = self._sample_interval()
 
         # collect valid Phase 1 commitments
-        valid = [c for c in PHASE_1_COMMITMENTS if can_commit(fighter, c, config)]
+        valid = [c for c in PHASE_1_COMMITMENTS_ORDERED
+                 if can_commit(fighter, c, config)]
         if not valid:
             return None
 

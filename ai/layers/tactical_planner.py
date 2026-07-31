@@ -129,9 +129,23 @@ class TacticalPlanner:
         self._last_prediction_label: str | None = None
         self._last_prediction_confidence: float = 0.0
 
+        # Commitments entered this tick *besides* the one decide() returns.
+        # Drained by the caller via take_extra_commitments().
+        self._extra_commitments: list[CombatCommitment] = []
+
     @property
     def tier(self) -> AITier:
         return self._tier
+
+    def take_extra_commitments(self) -> list[CombatCommitment]:
+        """Drain commitments entered this tick other than decide()'s return.
+
+        Call immediately after decide(). These must be recorded and emitted like
+        any other commitment, or the replay stream will be incomplete.
+        """
+        extras = list(self._extra_commitments)
+        self._extra_commitments.clear()
+        return extras
 
     @property
     def memory(self) -> PlannerMemory:
@@ -183,21 +197,35 @@ class TacticalPlanner:
         sim: SimulationState,
         config: GameConfig,
     ) -> CombatCommitment | None:
-        """Called each tick. Returns a commitment if one should fire now."""
+        """Called each tick. Returns a commitment if one should fire now.
+
+        A tick may enter more than one commitment (a guard release followed by an
+        attack). `decide` returns the primary one; call
+        `take_extra_commitments()` afterwards to collect the rest, which callers
+        must do so replay recording and event emission stay complete.
+        """
+        self._extra_commitments.clear()
         if not ai_state.is_alive:
             return None
 
         # T2 is intentionally allowed to release guard with perfect timing.
         # BLOCKING is a locked state, so without this explicit release the AI
         # would hold guard forever after using it once.
+        #
+        # This goes through BLOCK_RELEASE rather than assigning fsm_state
+        # directly. A direct assignment is invisible to the replay commitment
+        # stream, so a replayed match would leave the AI stuck in BLOCKING while
+        # the recorded one walked away — the exact divergence that kept replay
+        # verification failing. Anything policy-driven that mutates state has to
+        # be expressible as a commitment.
         if (self._tier == AITier.T2_FULL_ADAPTIVE
                 and ai_state.fsm_state == FSMState.BLOCKING):
             if (sim.tick_id <= self._guard_until_tick
                     or self._player_is_immediate_threat(sim.player)):
                 return None
-            ai_state.fsm_state = FSMState.IDLE
-            ai_state.active_commitment = None
-            ai_state.velocity_x = 0
+            if attempt_commitment(
+                    ai_state, CombatCommitment.BLOCK_RELEASE, config):
+                self._extra_commitments.append(CombatCommitment.BLOCK_RELEASE)
 
         if ai_state.is_locked:
             return None

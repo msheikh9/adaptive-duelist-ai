@@ -17,6 +17,13 @@ from config.config_loader import GameConfig
 def can_commit(fighter: FighterState, commitment: CombatCommitment,
                config: GameConfig) -> bool:
     """Check if a fighter can enter a new commitment right now."""
+    # BLOCK_RELEASE is the one commitment enterable *from* a locked state — it
+    # exists precisely to leave BLOCKING, which the FSM never exits on its own.
+    # Routing guard release through a real commitment (rather than mutating
+    # fsm_state directly) is what lets it reach the replay stream.
+    if commitment == CombatCommitment.BLOCK_RELEASE:
+        return fighter.fsm_state == FSMState.BLOCKING
+
     if fighter.fsm_state not in FREE_STATES:
         return False
 
@@ -105,6 +112,13 @@ def enter_commitment(fighter: FighterState, commitment: CombatCommitment,
             fighter.fsm_state = FSMState.BLOCKING
             fighter.fsm_frames_remaining = 0
             fighter.velocity_x = 0
+
+        case CombatCommitment.BLOCK_RELEASE:
+            # Drop guard and become actionable again on the same tick.
+            fighter.fsm_state = FSMState.IDLE
+            fighter.fsm_frames_remaining = 0
+            fighter.velocity_x = 0
+            fighter.active_commitment = None
 
         case CombatCommitment.SHOOT_START:
             # Player: startup → charging (hold to accumulate)

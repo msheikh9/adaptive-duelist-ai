@@ -41,6 +41,18 @@ PHASE_1_COMMITMENTS = frozenset({
     CombatCommitment.DODGE_BACKWARD,
 })
 
+# Canonical iteration order for the same set.
+#
+# Use this — never the frozenset — anywhere order can influence behaviour, above
+# all when building a candidate list that is then fed to an RNG. Enum hashes by
+# member *name* and CPython randomises string hashing per process, so frozenset
+# iteration order genuinely differs between runs. Iterating the frozenset to
+# build weighted choices made matches unreproducible across processes from the
+# same seed, quietly contradicting the project's determinism guarantee.
+PHASE_1_COMMITMENTS_ORDERED: tuple[CombatCommitment, ...] = tuple(
+    sorted(PHASE_1_COMMITMENTS, key=lambda c: c.value)
+)
+
 
 class FSMState(Enum):
     """Fighter finite state machine states."""

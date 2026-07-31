@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import random
 
-from game.combat.actions import CombatCommitment, FSMState, PHASE_1_COMMITMENTS
+from game.combat.actions import (
+    CombatCommitment,
+    FSMState,
+    PHASE_1_COMMITMENTS,
+    PHASE_1_COMMITMENTS_ORDERED,
+)
 from game.combat.state_machine import can_commit
 from game.entities.fighter import attempt_commitment
 from game.state import FighterState, SimulationState
@@ -64,7 +69,7 @@ class BaselineAIController:
         # Collect valid commitments
         valid = []
         weights = []
-        for commitment in PHASE_1_COMMITMENTS:
+        for commitment in PHASE_1_COMMITMENTS_ORDERED:
             if can_commit(ai_state, commitment, config):
                 valid.append(commitment)
                 weights.append(BASELINE_WEIGHTS.get(commitment, 1.0))
@@ -89,6 +94,52 @@ class BaselineAIController:
         if attempt_commitment(ai_state, chosen, config):
             return chosen
 
+        return None
+
+    def reset(self, rng_seed: int) -> None:
+        self._rng = random.Random(rng_seed)
+        self._ticks_until_decision = self._sample_interval()
+
+
+class UniformRandomAIController:
+    """A genuinely uniform random policy — the T0 evaluation baseline.
+
+    `BaselineAIController` is not uniform: it weights commitments and biases
+    toward advancing when far away, which makes it a tuned heuristic rather than
+    a control. This controller picks uniformly among whatever is currently legal,
+    so a tier comparison against it measures what the learned tiers add over
+    chance alone.
+
+    Same decision cadence and the same FSM/stamina/cooldown constraints as every
+    other policy — the only difference is the distribution.
+    """
+
+    def __init__(self, rng_seed: int) -> None:
+        self._rng = random.Random(rng_seed)
+        self._ticks_until_decision = self._sample_interval()
+
+    def _sample_interval(self) -> int:
+        return self._rng.randint(DECISION_INTERVAL_MIN, DECISION_INTERVAL_MAX)
+
+    def decide(self, ai_state: FighterState, sim: SimulationState,
+               config: GameConfig) -> CombatCommitment | None:
+        """Choose uniformly among legal commitments. Returns what was entered."""
+        if not ai_state.is_alive or ai_state.is_locked:
+            return None
+
+        self._ticks_until_decision -= 1
+        if self._ticks_until_decision > 0:
+            return None
+        self._ticks_until_decision = self._sample_interval()
+
+        valid = [c for c in PHASE_1_COMMITMENTS_ORDERED
+                 if can_commit(ai_state, c, config)]
+        if not valid:
+            return None
+
+        chosen = self._rng.choice(valid)
+        if attempt_commitment(ai_state, chosen, config):
+            return chosen
         return None
 
     def reset(self, rng_seed: int) -> None:

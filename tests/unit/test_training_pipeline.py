@@ -277,8 +277,18 @@ class TestRunPipeline:
         assert result.promoted is False
         assert result.promotion_reason == "auto_promote_disabled"
 
-    def test_auto_promote_no_baseline_promotes(self, tmp_db, game_cfg, fast_ai_cfg):
-        """No baseline → promote unconditionally."""
+    def test_auto_promote_no_baseline_promotes(
+        self, tmp_db, tmp_path, game_cfg, fast_ai_cfg, monkeypatch,
+    ):
+        """No baseline → promote unconditionally.
+
+        baseline_path=None makes the pipeline fall back to find_baseline(), which
+        searches the real baselines/ directory. Point that at an empty temp dir,
+        or this test passes only while the developer happens to have no baseline
+        committed — running `cli.py create-baseline` used to break it.
+        """
+        monkeypatch.setattr(
+            "evaluation.baselines.BASELINES_DIR", tmp_path / "empty_baselines")
         pipeline = TrainingPipeline(tmp_db, game_cfg, fast_ai_cfg, baseline_path=None)
 
         db = Database(tmp_db)

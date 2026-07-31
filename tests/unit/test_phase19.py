@@ -156,11 +156,11 @@ class TestEngineWhiffPopup:
         e = engine_factory()
 
         # Force conditions: player was in ATTACK_ACTIVE last tick
-        e._prev_player_fsm = FSMState.ATTACK_ACTIVE
+        e._sim_ctx.prev_player_fsm = FSMState.ATTACK_ACTIVE
         e._state.player.fsm_state = FSMState.ATTACK_RECOVERY
         e._state.player.active_commitment = CombatCommitment.LIGHT_ATTACK
         # hit_tracker has NOT connected
-        e._hit_tracker.reset("player")
+        e._sim_ctx.hit_tracker.reset("player")
 
         # Manually trigger the whiff detection block by calling the relevant
         # part of _simulate via a fresh simulate with no real inputs
@@ -170,9 +170,9 @@ class TestEngineWhiffPopup:
 
         # The whiff block runs inside _simulate; run just that logic path
         # by checking the conditions directly (same code path as engine)
-        player_hit_connected = e._hit_tracker.has_connected("player")
+        player_hit_connected = e._sim_ctx.hit_tracker.has_connected("player")
         whiff = (
-            e._prev_player_fsm == FSMState.ATTACK_ACTIVE
+            e._sim_ctx.prev_player_fsm == FSMState.ATTACK_ACTIVE
             and e._state.player.fsm_state == FSMState.ATTACK_RECOVERY
             and not player_hit_connected
         )

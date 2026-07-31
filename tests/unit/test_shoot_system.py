@@ -20,7 +20,11 @@ import pytest
 
 from config.config_loader import load_config
 from game.combat.actions import CombatCommitment, FSMState
-from game.combat.projectile import Projectile
+from game.combat.projectile import (
+    Projectile,
+    fire_projectile,
+    update_projectiles,
+)
 from game.combat.state_machine import (
     can_commit,
     enter_commitment,
@@ -343,7 +347,7 @@ class TestProjectileDataclass:
 
 
 # ---------------------------------------------------------------------------
-# Engine integration — _fire_projectile / _update_projectiles
+# Projectile simulation integration — fire_projectile / update_projectiles
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -375,23 +379,23 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        assert len(engine._projectiles) == 1
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        assert len(engine._sim_ctx.projectiles) == 1
 
     def test_fire_projectile_correct_owner(self, tmp_engine, game_cfg):
         engine = tmp_engine
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        assert engine._projectiles[0].owner == "PLAYER"
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        assert engine._sim_ctx.projectiles[0].owner == "PLAYER"
 
     def test_fire_projectile_sets_cooldown(self, tmp_engine, game_cfg):
         engine = tmp_engine
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
         assert fighter.shoot_cooldown == game_cfg.actions.shoot.cooldown_frames
 
     def test_fire_projectile_resets_charge_ticks(self, tmp_engine, game_cfg):
@@ -399,7 +403,7 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 30
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
         assert fighter.charge_ticks == 0
 
     def test_fire_projectile_min_damage_when_uncharged(self, tmp_engine, game_cfg):
@@ -407,8 +411,8 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        proj = engine._projectiles[0]
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        proj = engine._sim_ctx.projectiles[0]
         assert proj.damage == game_cfg.actions.shoot.min_damage
 
     def test_fire_projectile_max_damage_when_full_charge(self, tmp_engine, game_cfg):
@@ -416,8 +420,8 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = game_cfg.actions.shoot.max_charge_frames
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        proj = engine._projectiles[0]
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        proj = engine._sim_ctx.projectiles[0]
         assert proj.damage == game_cfg.actions.shoot.max_damage
 
     def test_fire_projectile_velocity_follows_facing(self, tmp_engine, game_cfg):
@@ -425,8 +429,8 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = -1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        proj = engine._projectiles[0]
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        proj = engine._sim_ctx.projectiles[0]
         assert proj.velocity_x < 0
 
     def test_update_projectiles_moves_them(self, tmp_engine, game_cfg):
@@ -434,10 +438,10 @@ class TestEngineProjectileIntegration:
         fighter = engine._state.player
         fighter.facing = 1
         fighter.charge_ticks = 0
-        engine._fire_projectile(fighter, "PLAYER", game_cfg)
-        initial_x = engine._projectiles[0].x
-        engine._update_projectiles(engine._state, game_cfg)
-        assert engine._projectiles[0].x > initial_x
+        fire_projectile(fighter, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
+        initial_x = engine._sim_ctx.projectiles[0].x
+        update_projectiles(engine._state, game_cfg, engine._sim_ctx.projectiles)
+        assert engine._sim_ctx.projectiles[0].x > initial_x
 
     def test_update_projectiles_deactivates_out_of_bounds(self, tmp_engine, game_cfg):
         engine = tmp_engine
@@ -450,8 +454,8 @@ class TestEngineProjectileIntegration:
             owner="PLAYER",
             charge_frac=0.0,
         )
-        engine._projectiles.append(proj)
-        engine._update_projectiles(engine._state, game_cfg)
+        engine._sim_ctx.projectiles.append(proj)
+        update_projectiles(engine._state, game_cfg, engine._sim_ctx.projectiles)
         assert not proj.active
 
     def test_update_projectiles_removes_inactive(self, tmp_engine, game_cfg):
@@ -465,9 +469,9 @@ class TestEngineProjectileIntegration:
             owner="PLAYER",
             charge_frac=0.0,
         )
-        engine._projectiles.append(proj)
-        engine._update_projectiles(engine._state, game_cfg)
-        assert len(engine._projectiles) == 0
+        engine._sim_ctx.projectiles.append(proj)
+        update_projectiles(engine._state, game_cfg, engine._sim_ctx.projectiles)
+        assert len(engine._sim_ctx.projectiles) == 0
 
     def test_projectile_hits_opponent_reduces_hp(self, tmp_engine, game_cfg):
         """Place a PLAYER projectile directly on the AI fighter and check damage."""
@@ -484,8 +488,8 @@ class TestEngineProjectileIntegration:
             owner="PLAYER",
             charge_frac=0.0,
         )
-        engine._projectiles.append(proj)
-        engine._update_projectiles(state, game_cfg)
+        engine._sim_ctx.projectiles.append(proj)
+        update_projectiles(state, game_cfg, engine._sim_ctx.projectiles)
 
         assert state.ai.hp < initial_hp
 
@@ -503,8 +507,8 @@ class TestEngineProjectileIntegration:
             owner="PLAYER",
             charge_frac=0.0,
         )
-        engine._projectiles.append(proj)
-        engine._update_projectiles(state, game_cfg)
+        engine._sim_ctx.projectiles.append(proj)
+        update_projectiles(state, game_cfg, engine._sim_ctx.projectiles)
 
         assert state.player.hp == initial_hp
 
@@ -518,5 +522,5 @@ class TestEngineProjectileIntegration:
         # Simulate the engine's pending_shot drain logic
         if state.player.pending_shot:
             state.player.pending_shot = False
-            engine._fire_projectile(state.player, "PLAYER", game_cfg)
+            fire_projectile(state.player, "PLAYER", game_cfg, engine._sim_ctx.projectiles)
         assert state.player.pending_shot is False

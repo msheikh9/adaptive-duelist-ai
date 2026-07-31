@@ -157,21 +157,25 @@ def db(tmp_path):
         "INSERT INTO matches (match_id, session_id, started_at, rng_seed, "
         "config_hash) VALUES ('m1', 's1', '2025-01-01', 42, 'h');",
     )
-    # Insert player commitment events
+    # Insert player commitment events. These must use the same encoding the
+    # serializer writes — Actor.name ('PLAYER') and EventType.name
+    # ('COMMITMENT_START'). The fixture previously used 'player'/'commitment',
+    # which matched the metric's own lowercase query but never matched real data,
+    # so a broken metric looked correct here.
     d.execute_safe(
         "INSERT INTO semantic_events (event_type, match_id, tick_id, actor, "
         "commitment, actor_hp, opponent_hp, actor_stamina, opponent_stamina) VALUES "
-        "('commitment', 'm1', 10, 'player', 'LIGHT_ATTACK', 200, 200, 100, 100);"
+        "('COMMITMENT_START', 'm1', 10, 'PLAYER', 'LIGHT_ATTACK', 200, 200, 100, 100);"
     )
     d.execute_safe(
         "INSERT INTO semantic_events (event_type, match_id, tick_id, actor, "
         "commitment, actor_hp, opponent_hp, actor_stamina, opponent_stamina) VALUES "
-        "('commitment', 'm1', 30, 'player', 'HEAVY_ATTACK', 180, 200, 80, 100);"
+        "('COMMITMENT_START', 'm1', 30, 'PLAYER', 'HEAVY_ATTACK', 180, 200, 80, 100);"
     )
     d.execute_safe(
         "INSERT INTO semantic_events (event_type, match_id, tick_id, actor, "
         "commitment, actor_hp, opponent_hp, actor_stamina, opponent_stamina) VALUES "
-        "('commitment', 'm1', 50, 'player', 'DODGE_BACKWARD', 160, 180, 60, 90);"
+        "('COMMITMENT_START', 'm1', 50, 'PLAYER', 'DODGE_BACKWARD', 160, 180, 60, 90);"
     )
     # Insert ai_decisions with predictions
     probs1 = json.dumps({"LIGHT_ATTACK": 0.6, "HEAVY_ATTACK": 0.3, "DODGE_BACKWARD": 0.1})

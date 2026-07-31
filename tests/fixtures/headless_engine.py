@@ -25,17 +25,13 @@ from data.logger import GameLogger
 from data.tick_snapshot import TickSnapshot
 from game.arena import classify_spacing
 from game.combat.actions import Actor, CombatCommitment, FSMState
-from game.combat.collision import HitTracker, check_hit
-from game.combat.damage import apply_hit
-from game.combat.physics import (
-    apply_dodge_velocity,
-    apply_velocity,
-    clamp_to_arena,
-    update_facing,
-)
-from game.combat.stamina import tick_stamina
-from game.combat.state_machine import tick_fsm
 from game.entities.ai_fighter import BaselineAIController
+from game.entities.fighter import attempt_commitment
+from game.simulation_step import (
+    SimulationContext,
+    TickEffects,
+    step_simulation,
+)
 from game.state import (
     ArenaState,
     FighterState,
@@ -81,77 +77,54 @@ class HeadlessMatch:
         )
 
         self.ai_ctrl = BaselineAIController(rng_seed)
-        self.hit_tracker = HitTracker()
+        self.sim_ctx = SimulationContext()
         self.events: list = []
         self.snapshots: list[TickSnapshot] = []
+        self.last_effects: TickEffects | None = None
+
+    @property
+    def hit_tracker(self):
+        """The shared hit tracker. Kept as a property for existing tests."""
+        return self.sim_ctx.hit_tracker
 
     def tick(self, player_commitment: CombatCommitment | None = None) -> None:
-        """Advance simulation by one tick with optional player action."""
+        """Advance simulation by one tick with optional player action.
+
+        Runs the same `step_simulation` as the live engine, so this fixture
+        exercises gravity, guard regen, cooldown decay and projectiles rather
+        than a reduced subset of them.
+        """
         state = self.state
         cfg = self.cfg
-        scale = cfg.simulation.sub_pixel_scale
-        fighter_w_sub = cfg.fighter.width * scale
 
         if state.match_status == MatchStatus.ENDED:
             return
 
         state.set_phase(TickPhase.SIMULATE)
 
-        # Player commitment
-        if player_commitment is not None:
-            from game.entities.fighter import attempt_commitment
-            attempt_commitment(state.player, player_commitment, cfg)
+        def decide_player() -> list[CombatCommitment]:
+            if player_commitment is None:
+                return []
+            if attempt_commitment(state.player, player_commitment, cfg):
+                return [player_commitment]
+            return []
 
-        # AI decision
-        self.ai_ctrl.decide(state.ai, state, cfg)
+        def decide_ai() -> list[CombatCommitment]:
+            entered = self.ai_ctrl.decide(state.ai, state, cfg)
+            return [entered] if entered is not None else []
 
-        # Physics
-        apply_dodge_velocity(state.player, cfg)
-        apply_dodge_velocity(state.ai, cfg)
-        apply_velocity(state.player)
-        apply_velocity(state.ai)
-        clamp_to_arena(state.player, state.arena, fighter_w_sub)
-        clamp_to_arena(state.ai, state.arena, fighter_w_sub)
-        update_facing(state.player, state.ai)
+        fx = step_simulation(state, cfg, self.sim_ctx,
+                             decide_player, decide_ai)
+        self.last_effects = fx
 
-        # Collision
-        player_hit = check_hit(state.player, state.ai, "player",
-                                self.hit_tracker, cfg)
-        ai_hit = check_hit(state.ai, state.player, "ai",
-                            self.hit_tracker, cfg)
-
-        if player_hit:
-            apply_hit(state.ai, player_hit)
-            self.events.append(("HIT", Actor.PLAYER, player_hit))
-        if ai_hit:
-            apply_hit(state.player, ai_hit)
-            self.events.append(("HIT", Actor.AI, ai_hit))
-
-        # Stamina
-        tick_stamina(state.player, cfg)
-        tick_stamina(state.ai, cfg)
-
-        # Reset hit tracker for free fighters
-        if state.player.is_free:
-            self.hit_tracker.reset("player")
-        if state.ai.is_free:
-            self.hit_tracker.reset("ai")
-
-        # FSM advance
-        tick_fsm(state.player, cfg)
-        tick_fsm(state.ai, cfg)
+        if fx.player_hit:
+            self.events.append(("HIT", Actor.PLAYER, fx.player_hit))
+        if fx.ai_hit:
+            self.events.append(("HIT", Actor.AI, fx.ai_hit))
 
         # Snapshot
         state.set_phase(TickPhase.LOG)
         self.snapshots.append(TickSnapshot.from_state(state))
-
-        # KO check
-        if state.player.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "AI"
-        elif state.ai.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "PLAYER"
 
         state.tick_id += 1
 

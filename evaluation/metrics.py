@@ -43,13 +43,28 @@ class DamageMetrics:
 
 @dataclass
 class PredictionAccuracyMetrics:
-    """Prediction quality from ai_decisions table."""
+    """Prediction quality from ai_decisions table.
+
+    `majority_class_accuracy` is the score a predictor would get by always
+    guessing the single most frequent actual next-commitment over the same
+    sample. Top-1 accuracy is close to meaningless without it — the label
+    distribution here is not uniform, so a large-looking accuracy can still be
+    no better than a constant guess.
+    """
 
     total_predictions: int
     top1_correct: int
     top1_accuracy: float
     top2_correct: int
     top2_accuracy: float
+    majority_class_label: str | None = None
+    majority_class_accuracy: float = 0.0
+    n_distinct_labels: int = 0
+
+    @property
+    def lift_over_majority(self) -> float:
+        """Top-1 accuracy minus the majority-class baseline, in points."""
+        return self.top1_accuracy - self.majority_class_accuracy
 
 
 @dataclass
@@ -167,10 +182,14 @@ def compute_prediction_accuracy(db, match_ids: list[str]) -> PredictionAccuracyM
             top2_correct=0, top2_accuracy=0.0,
         )
 
+    # NOTE: actor is stored as Actor.name — 'PLAYER', uppercase. This query read
+    # 'player' until it was fixed, so it matched zero rows and prediction
+    # accuracy silently reported 0/0 regardless of how the AI actually did.
     commits = db.fetchall(
         f"SELECT tick_id, commitment, match_id "
         f"FROM semantic_events WHERE match_id IN ({placeholders}) "
-        f"AND actor = 'player' AND commitment IS NOT NULL "
+        f"AND actor = 'PLAYER' AND event_type = 'COMMITMENT_START' "
+        f"AND commitment IS NOT NULL "
         f"ORDER BY match_id, tick_id;",
         tuple(match_ids),
     )
@@ -183,6 +202,7 @@ def compute_prediction_accuracy(db, match_ids: list[str]) -> PredictionAccuracyM
     top1_correct = 0
     top2_correct = 0
     total = 0
+    actual_counts: dict[str, int] = {}
 
     for d in decisions:
         mid = d["match_id"]
@@ -197,6 +217,7 @@ def compute_prediction_accuracy(db, match_ids: list[str]) -> PredictionAccuracyM
             continue
 
         total += 1
+        actual_counts[actual] = actual_counts.get(actual, 0) + 1
         if d["predicted_top"] == actual:
             top1_correct += 1
 
@@ -211,12 +232,22 @@ def compute_prediction_accuracy(db, match_ids: list[str]) -> PredictionAccuracyM
         if actual in top2_labels:
             top2_correct += 1
 
+    # Majority-class baseline over the same sample.
+    majority_label = None
+    majority_acc = 0.0
+    if actual_counts:
+        majority_label = max(actual_counts, key=actual_counts.__getitem__)
+        majority_acc = actual_counts[majority_label] / total
+
     return PredictionAccuracyMetrics(
         total_predictions=total,
         top1_correct=top1_correct,
         top1_accuracy=top1_correct / total if total else 0.0,
         top2_correct=top2_correct,
         top2_accuracy=top2_correct / total if total else 0.0,
+        majority_class_label=majority_label,
+        majority_class_accuracy=majority_acc,
+        n_distinct_labels=len(actual_counts),
     )
 
 

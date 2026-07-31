@@ -52,9 +52,13 @@ class ReplayRecorder:
 
     def __init__(self, initial_state: SimulationState,
                  game_cfg: GameConfig,
-                 checksum_interval: int = DEFAULT_CHECKSUM_INTERVAL) -> None:
+                 checksum_interval: int = DEFAULT_CHECKSUM_INTERVAL,
+                 out_dir: Path | None = None) -> None:
         self._game_cfg = game_cfg
         self._checksum_interval = checksum_interval
+        # Defaults to the project replays/ directory; overridable so headless
+        # runs can record into a scratch directory.
+        self._out_dir = out_dir or REPLAY_DIR
 
         # Layer A data
         self._initial_state_bytes = serialize_initial_state(initial_state)
@@ -209,9 +213,9 @@ class ReplayRecorder:
         replay_bytes = b"".join(parts)
 
         # Write to disk
-        REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+        self._out_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{match_id}.replay"
-        path = REPLAY_DIR / filename
+        path = self._out_dir / filename
         path.write_bytes(replay_bytes)
 
         log.debug("Replay written: %s (%d bytes, %d commitments, %d checksums, %d snapshots)",

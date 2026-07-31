@@ -12,21 +12,13 @@ import logging
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from config.config_loader import GameConfig
 from data.tick_snapshot import TickSnapshot
 from game.combat.actions import Actor, CombatCommitment, FSMState, FREE_STATES
-from game.combat.collision import HitTracker, check_hit
-from game.combat.damage import apply_hit
-from game.combat.physics import (
-    apply_dodge_velocity,
-    apply_velocity,
-    clamp_to_arena,
-    update_facing,
-)
-from game.combat.stamina import tick_stamina
-from game.combat.state_machine import tick_fsm
 from game.entities.fighter import attempt_commitment
+from game.simulation_step import SimulationContext, step_simulation
 from game.state import (
     ArenaState,
     FighterState,
@@ -140,79 +132,68 @@ def load_replay(path: Path) -> ReplayData:
     )
 
 
+def _drive_replay(
+    replay: ReplayData,
+    game_cfg: GameConfig,
+    on_tick_end: "Callable[[int, SimulationState], None] | None" = None,
+) -> SimulationState:
+    """Re-simulate a match from its recorded commitment stream.
+
+    Runs the same `step_simulation` the live engine runs; the only difference is
+    where commitments come from. `on_tick_end` is called after each tick with
+    (tick, state), before the tick counter advances — that is exactly when the
+    recorder writes its checksums.
+    """
+    state = _clone_initial_state(replay.initial_state)
+    state.set_phase(TickPhase.SIMULATE)
+    ctx = SimulationContext()
+
+    commitments_by_tick: dict[int, list[CommitmentRecord]] = {}
+    for c in replay.commitments:
+        commitments_by_tick.setdefault(c.tick_id, []).append(c)
+
+    def replay_actor(records, actor: Actor, fighter) -> list[CombatCommitment]:
+        """Re-enter the commitments recorded for `actor` on this tick, in order."""
+        entered: list[CombatCommitment] = []
+        for rec in records:
+            if rec.actor != actor:
+                continue
+            if attempt_commitment(fighter, rec.commitment, game_cfg):
+                entered.append(rec.commitment)
+        return entered
+
+    # header.total_ticks is the *index* of the final simulated tick, not a count
+    # (the recorder writes final_state.tick_id, and the engine finalizes before
+    # incrementing). So the inclusive bound is total_ticks, and iterating
+    # range(total_ticks) stopped one tick short — which left the final-state hash
+    # mismatching even when every periodic checksum agreed. The ENDED check below
+    # keeps this self-limiting, so the extra iteration is a no-op after a KO.
+    for tick in range(replay.header.total_ticks + 1):
+        if state.match_status == MatchStatus.ENDED:
+            break
+
+        records = commitments_by_tick.get(tick, ())
+        step_simulation(
+            state, game_cfg, ctx,
+            lambda: replay_actor(records, Actor.PLAYER, state.player),
+            lambda: replay_actor(records, Actor.AI, state.ai),
+        )
+
+        if on_tick_end is not None:
+            on_tick_end(tick, state)
+
+        state.tick_id += 1
+
+    return state
+
+
 def replay_match(replay: ReplayData, game_cfg: GameConfig) -> SimulationState:
     """Reconstruct a match by replaying commitments through simulation.
 
     Uses only Layer A data (initial state + commitment stream).
     Returns the final SimulationState.
     """
-    state = _clone_initial_state(replay.initial_state)
-    state.set_phase(TickPhase.SIMULATE)
-
-    hit_tracker = HitTracker()
-    scale = game_cfg.simulation.sub_pixel_scale
-    fighter_w_sub = game_cfg.fighter.width * scale
-
-    # Index commitments by tick for fast lookup
-    commitments_by_tick: dict[int, list[CommitmentRecord]] = {}
-    for c in replay.commitments:
-        commitments_by_tick.setdefault(c.tick_id, []).append(c)
-
-    total_ticks = replay.header.total_ticks
-
-    for tick in range(total_ticks):
-        if state.match_status == MatchStatus.ENDED:
-            break
-
-        # Apply commitments for this tick
-        tick_commits = commitments_by_tick.get(tick, [])
-        for c in tick_commits:
-            fighter = state.player if c.actor == Actor.PLAYER else state.ai
-            attempt_commitment(fighter, c.commitment, game_cfg)
-
-        # Physics
-        apply_dodge_velocity(state.player, game_cfg)
-        apply_dodge_velocity(state.ai, game_cfg)
-        apply_velocity(state.player)
-        apply_velocity(state.ai)
-        clamp_to_arena(state.player, state.arena, fighter_w_sub)
-        clamp_to_arena(state.ai, state.arena, fighter_w_sub)
-        update_facing(state.player, state.ai)
-
-        # Collision
-        player_hit = check_hit(state.player, state.ai, "player", hit_tracker, game_cfg)
-        ai_hit = check_hit(state.ai, state.player, "ai", hit_tracker, game_cfg)
-
-        if player_hit:
-            apply_hit(state.ai, player_hit)
-        if ai_hit:
-            apply_hit(state.player, ai_hit)
-
-        # Stamina
-        tick_stamina(state.player, game_cfg)
-        tick_stamina(state.ai, game_cfg)
-
-        # Reset hit tracker for free fighters
-        if state.player.is_free:
-            hit_tracker.reset("player")
-        if state.ai.is_free:
-            hit_tracker.reset("ai")
-
-        # FSM advance
-        tick_fsm(state.player, game_cfg)
-        tick_fsm(state.ai, game_cfg)
-
-        # KO check
-        if state.player.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "AI"
-        elif state.ai.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "PLAYER"
-
-        state.tick_id += 1
-
-    return state
+    return _drive_replay(replay, game_cfg)
 
 
 def verify_replay(replay: ReplayData, game_cfg: GameConfig) -> VerificationResult:
@@ -223,89 +204,24 @@ def verify_replay(replay: ReplayData, game_cfg: GameConfig) -> VerificationResul
     result = VerificationResult()
 
     try:
-        state = _clone_initial_state(replay.initial_state)
-        state.set_phase(TickPhase.SIMULATE)
-
-        hit_tracker = HitTracker()
-        scale = game_cfg.simulation.sub_pixel_scale
-        fighter_w_sub = game_cfg.fighter.width * scale
-
-        # Index commitments and checksums by tick
-        commitments_by_tick: dict[int, list[CommitmentRecord]] = {}
-        for c in replay.commitments:
-            commitments_by_tick.setdefault(c.tick_id, []).append(c)
-
-        checksums_by_tick: dict[int, ChecksumRecord] = {}
-        for cs in replay.checksums:
-            checksums_by_tick[cs.tick_id] = cs
-
+        checksums_by_tick: dict[int, ChecksumRecord] = {
+            cs.tick_id: cs for cs in replay.checksums
+        }
         result.total_checksums = len(replay.checksums)
-        total_ticks = replay.header.total_ticks
 
-        for tick in range(total_ticks):
-            if state.match_status == MatchStatus.ENDED:
-                break
+        def check(tick: int, state: SimulationState) -> None:
+            expected = checksums_by_tick.get(tick)
+            if expected is None:
+                return
+            actual_hash = compute_state_hash(state)
+            if actual_hash != expected.state_md5:
+                result.passed = False
+                result.failed_checksums += 1
+                result.checksum_failures.append(
+                    (tick, expected.state_md5, actual_hash)
+                )
 
-            # Apply commitments
-            tick_commits = commitments_by_tick.get(tick, [])
-            for c in tick_commits:
-                fighter = state.player if c.actor == Actor.PLAYER else state.ai
-                attempt_commitment(fighter, c.commitment, game_cfg)
-
-            # Physics
-            apply_dodge_velocity(state.player, game_cfg)
-            apply_dodge_velocity(state.ai, game_cfg)
-            apply_velocity(state.player)
-            apply_velocity(state.ai)
-            clamp_to_arena(state.player, state.arena, fighter_w_sub)
-            clamp_to_arena(state.ai, state.arena, fighter_w_sub)
-            update_facing(state.player, state.ai)
-
-            # Collision
-            player_hit = check_hit(state.player, state.ai, "player",
-                                   hit_tracker, game_cfg)
-            ai_hit = check_hit(state.ai, state.player, "ai",
-                               hit_tracker, game_cfg)
-
-            if player_hit:
-                apply_hit(state.ai, player_hit)
-            if ai_hit:
-                apply_hit(state.player, ai_hit)
-
-            # Stamina
-            tick_stamina(state.player, game_cfg)
-            tick_stamina(state.ai, game_cfg)
-
-            # Reset hit tracker
-            if state.player.is_free:
-                hit_tracker.reset("player")
-            if state.ai.is_free:
-                hit_tracker.reset("ai")
-
-            # FSM advance
-            tick_fsm(state.player, game_cfg)
-            tick_fsm(state.ai, game_cfg)
-
-            # Verify checksum after simulation (matches recorder timing: LOG phase)
-            if tick in checksums_by_tick:
-                expected = checksums_by_tick[tick]
-                actual_hash = compute_state_hash(state)
-                if actual_hash != expected.state_md5:
-                    result.passed = False
-                    result.failed_checksums += 1
-                    result.checksum_failures.append(
-                        (tick, expected.state_md5, actual_hash)
-                    )
-
-            # KO check
-            if state.player.fsm_state == FSMState.KO:
-                state.match_status = MatchStatus.ENDED
-                state.winner = "AI"
-            elif state.ai.fsm_state == FSMState.KO:
-                state.match_status = MatchStatus.ENDED
-                state.winner = "PLAYER"
-
-            state.tick_id += 1
+        state = _drive_replay(replay, game_cfg, on_tick_end=check)
 
         # Verify final state checksum (last entry in checksums list)
         if replay.checksums:

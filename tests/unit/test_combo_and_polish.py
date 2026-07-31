@@ -168,12 +168,12 @@ class TestComboResetOnWhiff:
         engine._start_match()
         if who == "player":
             engine._player_combo = 3
-            engine._prev_player_fsm = FSMState.ATTACK_ACTIVE
+            engine._sim_ctx.prev_player_fsm = FSMState.ATTACK_ACTIVE
             engine._state.player.fsm_state = FSMState.ATTACK_RECOVERY
             # hit_tracker has NOT connected for player → whiff condition true
         else:
             engine._ai_combo = 4
-            engine._prev_ai_fsm = FSMState.ATTACK_ACTIVE
+            engine._sim_ctx.prev_ai_fsm = FSMState.ATTACK_ACTIVE
             engine._state.ai.fsm_state = FSMState.ATTACK_RECOVERY
 
     def test_player_whiff_resets_player_combo(self, engine_factory):
@@ -181,9 +181,9 @@ class TestComboResetOnWhiff:
         engine = engine_factory()
         self._setup_whiff(engine, "player")
         # Run the whiff-detection branch manually (mirrors _simulate logic)
-        if (engine._prev_player_fsm == FSMState.ATTACK_ACTIVE
+        if (engine._sim_ctx.prev_player_fsm == FSMState.ATTACK_ACTIVE
                 and engine._state.player.fsm_state == FSMState.ATTACK_RECOVERY
-                and not engine._hit_tracker.has_connected("player")):
+                and not engine._sim_ctx.hit_tracker.has_connected("player")):
             engine._player_combo = 0
         assert engine._player_combo == 0
 
@@ -191,9 +191,9 @@ class TestComboResetOnWhiff:
         from game.combat.actions import FSMState
         engine = engine_factory()
         self._setup_whiff(engine, "ai")
-        if (engine._prev_ai_fsm == FSMState.ATTACK_ACTIVE
+        if (engine._sim_ctx.prev_ai_fsm == FSMState.ATTACK_ACTIVE
                 and engine._state.ai.fsm_state == FSMState.ATTACK_RECOVERY
-                and not engine._hit_tracker.has_connected("ai")):
+                and not engine._sim_ctx.hit_tracker.has_connected("ai")):
             engine._ai_combo = 0
         assert engine._ai_combo == 0
 
@@ -202,9 +202,9 @@ class TestComboResetOnWhiff:
         engine = engine_factory()
         self._setup_whiff(engine, "player")
         engine._ai_combo = 5
-        if (engine._prev_player_fsm == FSMState.ATTACK_ACTIVE
+        if (engine._sim_ctx.prev_player_fsm == FSMState.ATTACK_ACTIVE
                 and engine._state.player.fsm_state == FSMState.ATTACK_RECOVERY
-                and not engine._hit_tracker.has_connected("player")):
+                and not engine._sim_ctx.hit_tracker.has_connected("player")):
             engine._player_combo = 0
         assert engine._ai_combo == 5  # AI combo untouched
 
@@ -223,11 +223,11 @@ class TestComboResetOnRecovery:
         engine._player_combo = 3
 
         # Fake: AI was in HITSTUN last tick, now in IDLE, no hit this tick
-        engine._prev_ai_fsm = FSMState.HITSTUN
+        engine._sim_ctx.prev_ai_fsm = FSMState.HITSTUN
         engine._state.ai.fsm_state = FSMState.IDLE
         player_hit = None  # no hit this tick
 
-        if (engine._prev_ai_fsm == FSMState.HITSTUN
+        if (engine._sim_ctx.prev_ai_fsm == FSMState.HITSTUN
                 and engine._state.ai.fsm_state in FREE_STATES
                 and not player_hit):
             engine._player_combo = 0
@@ -241,11 +241,11 @@ class TestComboResetOnRecovery:
         engine._start_match()
         engine._player_combo = 3
 
-        engine._prev_ai_fsm = FSMState.HITSTUN
+        engine._sim_ctx.prev_ai_fsm = FSMState.HITSTUN
         engine._state.ai.fsm_state = FSMState.IDLE
         player_hit = _make_hit_event(is_heavy=False)  # hit landed this tick
 
-        if (engine._prev_ai_fsm == FSMState.HITSTUN
+        if (engine._sim_ctx.prev_ai_fsm == FSMState.HITSTUN
                 and engine._state.ai.fsm_state in FREE_STATES
                 and not player_hit):
             engine._player_combo = 0
@@ -259,11 +259,11 @@ class TestComboResetOnRecovery:
         engine._start_match()
         engine._ai_combo = 2
 
-        engine._prev_player_fsm = FSMState.HITSTUN
+        engine._sim_ctx.prev_player_fsm = FSMState.HITSTUN
         engine._state.player.fsm_state = FSMState.IDLE
         ai_hit = None
 
-        if (engine._prev_player_fsm == FSMState.HITSTUN
+        if (engine._sim_ctx.prev_player_fsm == FSMState.HITSTUN
                 and engine._state.player.fsm_state in FREE_STATES
                 and not ai_hit):
             engine._ai_combo = 0

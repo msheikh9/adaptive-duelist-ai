@@ -11,7 +11,9 @@ build/
 # Virtual environments
 venv/
 .venv/
-env/
+# Anchored to the repo root: an unanchored "env/" matches at any depth and would
+# silently swallow a source package such as game/env/ or ai/env/.
+/env/
 
 # IDE
 .idea/
@@ -23,7 +25,13 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project runtime data
+# Project runtime data.
+#
+# These directories are created by the project at runtime and their contents are
+# ignored, but the directories themselves are tracked via .gitkeep. Git cannot
+# track an empty directory, so without those placeholders db/, models/, replays/
+# and logs/ are simply absent from a fresh clone — and tools that expect them to
+# exist fail on a new checkout rather than starting empty.
 db/*.db
 db/*.db-shm
 db/*.db-wal
@@ -42,8 +50,13 @@ results.csv
 .pytest_cache/
 junit*.xml
 
-# Analytics output
-analytics/output/
+# Analytics output.
+#
+# Ignore the contents, not the directory. Git cannot re-include a file whose
+# parent directory is excluded, so "analytics/output/" would make the .gitkeep
+# below unstageable no matter what follows it.
+analytics/output/*
+!analytics/output/.gitkeep
 
 # Coverage
 .coverage

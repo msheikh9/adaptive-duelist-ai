@@ -44,22 +44,19 @@ from data.tick_snapshot import TickSnapshot
 from game.arena import classify_spacing
 from game.clock import GameClock
 from game.combat.actions import Actor, CombatCommitment, FSMState, FREE_STATES
-from game.combat.collision import HitTracker, check_hit, was_dodge_avoided
-from game.combat.damage import apply_hit
-from game.combat.physics import (
-    apply_dodge_velocity,
-    apply_gravity,
-    apply_velocity,
-    clamp_to_arena,
-    handle_landing,
-    update_facing,
+from game.combat.projectile import Projectile, ProjectileHitEffect
+from game.combat.state_machine import stop_moving
+from game.entities.fighter import attempt_commitment
+from game.semantic_events import (
+    EventRouter,
+    build_commitment_event,
+    build_hit_event,
+    build_simple_event,
 )
-from game.combat.stamina import tick_stamina
-from game.combat.guard import apply_block_response, tick_guard
-from game.combat.projectile import Projectile
-from game.combat.state_machine import (
-    enter_landing, tick_fsm, stop_moving, tick_dodge_cooldown, tick_heavy_cooldown,
-    tick_shoot_cooldown,
+from game.simulation_step import (
+    SimulationContext,
+    TickEffects,
+    step_simulation,
 )
 from game.entities.ai_fighter import BaselineAIController
 from game.entities.player_fighter import PlayerController
@@ -123,7 +120,11 @@ class Engine:
         self._ai_ctrl: BaselineAIController | None = None
         self._renderer: Renderer | None = None
         self._game_logger = GameLogger(db)
-        self._hit_tracker = HitTracker()
+
+        # Per-match simulation state (hit tracker, live projectiles, previous
+        # FSM states, reaction-time bookkeeping). Shared with the replay
+        # verifier, batch evaluator and test fixture via step_simulation.
+        self._sim_ctx = SimulationContext()
 
         self._session_id = str(uuid.uuid4())
         self._match_id = ""
@@ -168,19 +169,8 @@ class Engine:
         # Drained into renderer.spawn_text_popup() each display frame.
         self._pending_popups: list[tuple[str, int, int, bool]] = []
 
-        # Phase 20: live projectiles
-        self._projectiles: list[Projectile] = []
-
         # Phase 15: sound hooks
         self._sound = NullSoundManager()
-
-        # Track last commitment ticks for reaction time calculation
-        self._last_player_commit_tick = 0
-        self._last_ai_commit_tick = 0
-
-        # Track previous FSM states to detect COMMITMENT_END transitions
-        self._prev_player_fsm: FSMState = FSMState.IDLE
-        self._prev_ai_fsm: FSMState = FSMState.IDLE
 
         # Behavior modeling layer
         self._behavior_model = BehaviorModel(db, ai_cfg, game_cfg)
@@ -199,6 +189,19 @@ class Engine:
         if ai_tier in (AITier.T1_MARKOV_ONLY, AITier.T2_FULL_ADAPTIVE):
             self._tactical_planner = TacticalPlanner(
                 db, self._prediction_engine, ai_cfg, game_cfg, ai_tier)
+
+        # Semantic event fan-out. The batch evaluator builds the same router
+        # over the same sinks, which is what keeps off-line evaluation and live
+        # play driving the prediction ensemble identically.
+        self._event_router = EventRouter(
+            game_cfg,
+            sinks=[
+                self._game_logger.record_event,
+                self._behavior_model.on_event,
+                self._prediction_engine.on_event,
+            ],
+            planner=self._tactical_planner,
+        )
 
     def run(self) -> None:
         """Initialize and run the main game loop."""
@@ -354,7 +357,7 @@ class Engine:
                 player_guard_break_flash=self._player_guard_break_flash,
                 ai_guard_break_flash=self._ai_guard_break_flash,
                 show_hitboxes=self._show_hitboxes,
-                projectiles=self._projectiles,
+                projectiles=self._sim_ctx.projectiles,
             )
 
         # Decay counters at display rate
@@ -455,260 +458,169 @@ class Engine:
         state.tick_id += 1
 
     def _simulate(self, inputs: list) -> None:
-        """Run all simulation subsystems for one tick."""
+        """Advance one tick via the shared step, then drain its effects.
+
+        All simulation lives in `game.simulation_step`; everything here is
+        policy (who decides what), presentation, replay recording, and event
+        emission.
+        """
         state = self._state
         gcfg = self._gcfg
-        scale = gcfg.simulation.sub_pixel_scale
-        fighter_w_sub = gcfg.fighter.width * scale
 
-        # --- Process player input ---
-        player_commitment = self._player_ctrl.process_inputs(
-            state.player, inputs, gcfg
-        )
-        if player_commitment is not None:
-            self._emit_commitment_event(Actor.PLAYER, player_commitment)
-            if self._recorder:
-                self._recorder.record_commitment(
-                    state.tick_id, Actor.PLAYER, player_commitment)
-            if player_commitment == CombatCommitment.JUMP:
-                self._sound.play_jump()
-            elif player_commitment == CombatCommitment.DODGE_BACKWARD:
-                self._sound.play_dodge_start()
+        def decide_player() -> list[CombatCommitment]:
+            entered = self._player_ctrl.process_inputs(
+                state.player, inputs, gcfg)
+            return [entered] if entered is not None else []
 
-        # --- AI decision ---
-        if self._tactical_planner is not None:
-            ai_commitment = self._tactical_planner.decide(state.ai, state, gcfg)
-        else:
-            ai_commitment = self._ai_ctrl.decide(state.ai, state, gcfg)
-        if ai_commitment is not None:
-            self._emit_commitment_event(Actor.AI, ai_commitment)
-            if self._recorder:
-                self._recorder.record_commitment(
-                    state.tick_id, Actor.AI, ai_commitment)
-            if ai_commitment == CombatCommitment.JUMP:
-                self._sound.play_jump()
-            elif ai_commitment == CombatCommitment.DODGE_BACKWARD:
-                self._sound.play_dodge_start()
+        def decide_ai() -> list[CombatCommitment]:
+            entered: list[CombatCommitment] = []
+            if self._tactical_planner is not None:
+                c = self._tactical_planner.decide(state.ai, state, gcfg)
+                # Extras (e.g. a guard release) were entered before `c`.
+                entered.extend(self._tactical_planner.take_extra_commitments())
+            else:
+                c = self._ai_ctrl.decide(state.ai, state, gcfg)
+            if c is not None:
+                entered.append(c)
 
-        # --- Phase 20: AI minimal shoot trigger ---
-        # Fires an uncharged instant shot roughly every 3 seconds.
-        # Uses tick % 180 == 90 so existing tests (< 90 ticks) are unaffected.
-        if (state.tick_id % 180 == 90
-                and state.ai.is_free
-                and state.ai.shoot_cooldown == 0):
-            from game.entities.fighter import attempt_commitment as _ac
-            _ac(state.ai, CombatCommitment.SHOOT_INSTANT, gcfg)
+            # Phase 20: minimal AI shoot policy — an uncharged instant shot
+            # roughly every 3 seconds. tick % 180 == 90 keeps matches shorter
+            # than 90 ticks unaffected, which several tests rely on.
+            # MOVING is a free state, so this can legitimately fire on the same
+            # tick the planner entered a movement commitment and override it.
+            if (state.tick_id % 180 == 90
+                    and state.ai.is_free
+                    and state.ai.shoot_cooldown == 0):
+                if attempt_commitment(
+                        state.ai, CombatCommitment.SHOOT_INSTANT, gcfg):
+                    entered.append(CombatCommitment.SHOOT_INSTANT)
+            return entered
 
-        # --- Phase 20: accumulate charge ticks while in CHARGING state ---
-        if state.player.fsm_state == FSMState.CHARGING:
-            state.player.charge_ticks = min(
-                state.player.charge_ticks + 1,
-                gcfg.actions.shoot.max_charge_frames,
-            )
-        if state.ai.fsm_state == FSMState.CHARGING:
-            state.ai.charge_ticks = min(
-                state.ai.charge_ticks + 1,
-                gcfg.actions.shoot.max_charge_frames,
-            )
+        fx = step_simulation(state, gcfg, self._sim_ctx,
+                             decide_player, decide_ai)
+        self._drain_effects(fx)
 
-        # --- Phase 20: fire pending shots ---
-        if state.player.pending_shot:
-            state.player.pending_shot = False
-            self._fire_projectile(state.player, "PLAYER", gcfg)
-        if state.ai.pending_shot:
-            state.ai.pending_shot = False
-            self._fire_projectile(state.ai, "AI", gcfg)
+    def _drain_effects(self, fx: TickEffects) -> None:
+        """Translate a TickEffects into recording, events, and presentation."""
+        state = self._state
 
-        # --- Phase 17: tick dodge cooldowns (every tick regardless of FSM state) ---
-        tick_dodge_cooldown(state.player)
-        tick_dodge_cooldown(state.ai)
+        # --- Semantic event stream (shared with the batch evaluator) ---
+        self._event_router.route(state, self._match_id, self._sim_ctx, fx)
 
-        # --- Phase 17b: tick heavy attack cooldowns ---
-        tick_heavy_cooldown(state.player)
-        tick_heavy_cooldown(state.ai)
+        # --- Commitments: replay stream + sound ---
+        for actor, commitments in (
+            (Actor.PLAYER, fx.player_commitments),
+            (Actor.AI, fx.ai_commitments),
+        ):
+            for commitment in commitments:
+                if self._recorder:
+                    self._recorder.record_commitment(
+                        state.tick_id, actor, commitment)
+                if commitment == CombatCommitment.JUMP:
+                    self._sound.play_jump()
+                elif commitment == CombatCommitment.DODGE_BACKWARD:
+                    self._sound.play_dodge_start()
 
-        # --- Phase 20: tick shoot cooldowns ---
-        tick_shoot_cooldown(state.player)
-        tick_shoot_cooldown(state.ai)
+        # --- Muzzle flash for shots released this tick ---
+        for proj in fx.projectiles_fired:
+            self._pending_hit_vfx.append((proj.x, proj.y, False, "muzzle_flash"))
 
-        # --- Phase 18: tick guard regen ---
-        tick_guard(state.player, gcfg)
-        tick_guard(state.ai, gcfg)
-
-        # --- Phase 15: apply gravity (before velocity) ---
-        apply_gravity(state.player, state.arena, gcfg)
-        apply_gravity(state.ai, state.arena, gcfg)
-
-        # --- Apply dodge velocity (must be before general velocity) ---
-        apply_dodge_velocity(state.player, gcfg)
-        apply_dodge_velocity(state.ai, gcfg)
-
-        # --- Apply velocity (x and y) ---
-        apply_velocity(state.player)
-        apply_velocity(state.ai)
-
-        # --- Clamp to arena (x-axis + ceiling) ---
-        clamp_to_arena(state.player, state.arena, fighter_w_sub)
-        clamp_to_arena(state.ai, state.arena, fighter_w_sub)
-
-        # --- Phase 15: handle landing ---
-        player_landed = handle_landing(state.player, state.arena)
-        ai_landed = handle_landing(state.ai, state.arena)
-
-        if player_landed and state.player.fsm_state == FSMState.AIRBORNE:
-            enter_landing(state.player, gcfg.fighter.landing_recovery_frames)
+        # --- Landing ---
+        if fx.player_landed:
             self._sound.play_land()
-            # Phase 16: landing dust
-            self._pending_hit_vfx.append((state.player.x, state.player.y, False, "land"))
-
-        if ai_landed and state.ai.fsm_state == FSMState.AIRBORNE:
-            enter_landing(state.ai, gcfg.fighter.landing_recovery_frames)
+            self._pending_hit_vfx.append(
+                (state.player.x, state.player.y, False, "land"))
+        if fx.ai_landed:
             self._sound.play_land()
-            # Phase 16: landing dust
-            self._pending_hit_vfx.append((state.ai.x, state.ai.y, False, "land"))
+            self._pending_hit_vfx.append(
+                (state.ai.x, state.ai.y, False, "land"))
 
-        # --- Update facing ---
-        update_facing(state.player, state.ai)
-
-        # --- Collision detection ---
-        player_hit = check_hit(
-            state.player, state.ai, "player", self._hit_tracker, gcfg
-        )
-        ai_hit = check_hit(
-            state.ai, state.player, "ai", self._hit_tracker, gcfg
-        )
-
-        # --- Phase 17: detect dodge-avoided hits (before damage, attacker still active) ---
-        player_dodge_avoided = was_dodge_avoided(
-            state.player, state.ai, "player", self._hit_tracker, gcfg
-        )
-        ai_dodge_avoided = was_dodge_avoided(
-            state.ai, state.player, "ai", self._hit_tracker, gcfg
-        )
-
-        # --- Apply damage + trigger hit flash + juice ---
-
-        # Phase 18: check if defender was blocking — intercept hit before normal damage
-        if player_hit and state.ai.fsm_state == FSMState.BLOCKING:
-            guard_broken = apply_block_response(state.ai, player_hit, gcfg)
+        # --- Blocked hits ---
+        if fx.ai_blocked:
             self._ai_block_flash = _HIT_FLASH_TICKS
             self._player_combo = 0  # blocked hit doesn't continue a combo
-            if guard_broken:
+            if fx.ai_guard_broken:
                 self._ai_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
                 self._sound.play_guard_break()
                 self._pending_hit_vfx.append(
                     (state.ai.x, state.ai.y, True, "guard_break"))
-                # Phase 19: guard break text popup
                 self._pending_popups.append(
                     ("GUARD BREAK!", state.ai.x, state.ai.y, True))
             else:
                 self._sound.play_block()
                 self._pending_hit_vfx.append(
                     (state.ai.x, state.ai.y, False, "block"))
-            player_hit = None  # consumed by block
 
-        if ai_hit and state.player.fsm_state == FSMState.BLOCKING:
-            guard_broken = apply_block_response(state.player, ai_hit, gcfg)
+        if fx.player_blocked:
             self._player_block_flash = _HIT_FLASH_TICKS
-            self._ai_combo = 0  # blocked hit doesn't continue a combo
-            if guard_broken:
+            self._ai_combo = 0
+            if fx.player_guard_broken:
                 self._player_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
                 self._sound.play_guard_break()
                 self._pending_hit_vfx.append(
                     (state.player.x, state.player.y, True, "guard_break"))
-                # Phase 19: guard break text popup
                 self._pending_popups.append(
                     ("GUARD BREAK!", state.player.x, state.player.y, True))
             else:
                 self._sound.play_block()
                 self._pending_hit_vfx.append(
                     (state.player.x, state.player.y, False, "block"))
-            ai_hit = None  # consumed by block
 
-        if player_hit:
-            apply_hit(state.ai, player_hit)
+        # --- Landed melee hits ---
+        if fx.player_hit:
             self._ai_hit_flash = _HIT_FLASH_TICKS
-            self._emit_hit_event(Actor.PLAYER, player_hit)
-            self._apply_hit_juice(player_hit, state.ai.x, state.ai.y)
-            # Phase 16: increment player combo streak
+            self._apply_hit_juice(fx.player_hit, state.ai.x, state.ai.y)
             self._player_combo += 1
             self._player_combo_flash = _COMBO_FLASH_FRAMES
-            # Phase 20: combo ring burst at attacker when streak active
             if self._player_combo >= 2:
                 self._pending_hit_vfx.append(
                     (state.player.x, state.player.y, False, "combo_ring"))
-            # Phase 19: milestone popup at every 5-hit threshold
             if self._player_combo % 5 == 0:
                 self._pending_popups.append(
                     (f"{self._player_combo} HIT!", state.ai.x, state.ai.y, True))
 
-        if ai_hit:
-            apply_hit(state.player, ai_hit)
+        if fx.ai_hit:
             self._player_hit_flash = _HIT_FLASH_TICKS
-            self._emit_hit_event(Actor.AI, ai_hit)
-            self._apply_hit_juice(ai_hit, state.player.x, state.player.y)
-            # Phase 16: increment AI combo streak
+            self._apply_hit_juice(fx.ai_hit, state.player.x, state.player.y)
             self._ai_combo += 1
             self._ai_combo_flash = _COMBO_FLASH_FRAMES
-            # Phase 20: combo ring burst at attacker when streak active
             if self._ai_combo >= 2:
                 self._pending_hit_vfx.append(
                     (state.ai.x, state.ai.y, False, "combo_ring"))
-            # Phase 19: milestone popup at every 5-hit threshold
             if self._ai_combo % 5 == 0:
                 self._pending_popups.append(
-                    (f"{self._ai_combo} HIT!", state.player.x, state.player.y, True))
+                    (f"{self._ai_combo} HIT!",
+                     state.player.x, state.player.y, True))
 
-        # --- Phase 17: dodge-avoided VFX / sound ---
-        if player_dodge_avoided:
+        # --- Dodge-avoided ---
+        if fx.player_dodge_avoided:
             self._sound.play_dodge_avoid()
-            self._pending_hit_vfx.append((state.ai.x, state.ai.y, False, "dodge"))
-        if ai_dodge_avoided:
+            self._pending_hit_vfx.append(
+                (state.ai.x, state.ai.y, False, "dodge"))
+        if fx.ai_dodge_avoided:
             self._sound.play_dodge_avoid()
-            self._pending_hit_vfx.append((state.player.x, state.player.y, False, "dodge"))
+            self._pending_hit_vfx.append(
+                (state.player.x, state.player.y, False, "dodge"))
 
-        # --- Stamina ---
-        player_exhausted = tick_stamina(state.player, gcfg)
-        ai_exhausted = tick_stamina(state.ai, gcfg)
-        if player_exhausted:
-            self._emit_simple_event(EventType.STAMINA_EXHAUSTED, Actor.PLAYER)
-        if ai_exhausted:
-            self._emit_simple_event(EventType.STAMINA_EXHAUSTED, Actor.AI)
+        # --- Projectile impacts ---
+        for hit in fx.projectile_hits:
+            self._drain_projectile_hit(hit)
 
-        # --- Advance FSMs ---
-        if state.player.is_free:
-            self._hit_tracker.reset("player")
-        if state.ai.is_free:
-            self._hit_tracker.reset("ai")
-
-        tick_fsm(state.player, gcfg)
-        tick_fsm(state.ai, gcfg)
-
-        # --- Phase 20: move projectiles + collision ---
-        self._update_projectiles(state, gcfg)
-
-        # --- Phase 17: whiff detection (ATTACK_ACTIVE → ATTACK_RECOVERY without hit) ---
-        if (self._prev_player_fsm == FSMState.ATTACK_ACTIVE
-                and state.player.fsm_state == FSMState.ATTACK_RECOVERY
-                and not self._hit_tracker.has_connected("player")):
+        # --- Whiffs ---
+        if fx.player_whiffed:
             self._sound.play_whiff()
             self._player_whiff_flash = _HIT_FLASH_TICKS
             self._pending_hit_vfx.append(
                 (state.player.x, state.player.y, False, "whiff"))
-            self._player_combo = 0  # Phase 16: whiff breaks combo
-            # Phase 19: "MISS" text popup
+            self._player_combo = 0
             self._pending_popups.append(
                 ("MISS", state.player.x, state.player.y, False))
-
-        if (self._prev_ai_fsm == FSMState.ATTACK_ACTIVE
-                and state.ai.fsm_state == FSMState.ATTACK_RECOVERY
-                and not self._hit_tracker.has_connected("ai")):
+        if fx.ai_whiffed:
             self._sound.play_whiff()
             self._ai_whiff_flash = _HIT_FLASH_TICKS
             self._pending_hit_vfx.append(
                 (state.ai.x, state.ai.y, False, "whiff"))
-            self._ai_combo = 0  # Phase 16: whiff breaks combo
-            # Phase 19: "MISS" text popup
+            self._ai_combo = 0
             self._pending_popups.append(
                 ("MISS", state.ai.x, state.ai.y, False))
 
@@ -718,39 +630,54 @@ class Engine:
         if self._ai_whiff_flash > 0:
             self._ai_whiff_flash -= 1
 
-        # Phase 16: reset combo when opponent recovers from hitstun without being re-hit
-        if (self._prev_ai_fsm == FSMState.HITSTUN
-                and state.ai.fsm_state in FREE_STATES
-                and not player_hit):
+        # --- Streaks broken by the opponent escaping hitstun ---
+        if fx.player_combo_reset:
             self._player_combo = 0
-
-        if (self._prev_player_fsm == FSMState.HITSTUN
-                and state.player.fsm_state in FREE_STATES
-                and not ai_hit):
+        if fx.ai_combo_reset:
             self._ai_combo = 0
 
-        # --- Detect COMMITMENT_END transitions ---
-        if (self._prev_player_fsm not in FREE_STATES
-                and state.player.fsm_state in FREE_STATES):
-            self._emit_simple_event(EventType.COMMITMENT_END, Actor.PLAYER)
-        if (self._prev_ai_fsm not in FREE_STATES
-                and state.ai.fsm_state in FREE_STATES):
-            self._emit_simple_event(EventType.COMMITMENT_END, Actor.AI)
-            if self._tactical_planner is not None:
-                self._tactical_planner.on_ai_commit_end(
-                    state.tick_id, state.ai.hp, state.player.hp)
-        self._prev_player_fsm = state.player.fsm_state
-        self._prev_ai_fsm = state.ai.fsm_state
+        # --- KO ---
+        if fx.ko_winner is not None:
+            self._end_match()
 
-        # --- Check KO ---
-        if state.player.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "AI"
-            self._end_match()
-        elif state.ai.fsm_state == FSMState.KO:
-            state.match_status = MatchStatus.ENDED
-            state.winner = "PLAYER"
-            self._end_match()
+    def _drain_projectile_hit(self, hit: ProjectileHitEffect) -> None:
+        """Presentation for one projectile impact."""
+        target_is_ai = hit.target_actor == Actor.AI
+        target = self._state.ai if target_is_ai else self._state.player
+
+        if hit.blocked:
+            self._pending_hit_vfx.append(
+                (target.x, target.y, False, "block"))
+            if hit.guard_broken:
+                self._sound.play_guard_break()
+                if target_is_ai:
+                    self._ai_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                else:
+                    self._player_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
+                self._pending_popups.append(
+                    ("GUARD BREAK!", target.x, target.y, True))
+            return
+
+        if target_is_ai:
+            self._ai_hit_flash = _HIT_FLASH_TICKS
+        else:
+            self._player_hit_flash = _HIT_FLASH_TICKS
+
+        kind = "heavy" if hit.is_heavy else "light"
+        self._pending_hit_vfx.append(
+            (hit.x, hit.y, hit.is_heavy, "projectile_hit"))
+        self._pending_hit_vfx.append((hit.x, hit.y, hit.is_heavy, kind))
+
+        # Hitstop is lighter than melee.
+        self._hitstop_remaining = max(
+            self._hitstop_remaining,
+            _HITSTOP_HEAVY if hit.is_heavy else _HITSTOP_LIGHT,
+        )
+
+        if hit.is_heavy:
+            self._sound.play_hit_heavy()
+        else:
+            self._sound.play_hit_light()
 
     def _apply_hit_juice(self, hit, defender_x: int, defender_y: int) -> None:
         """Set hitstop, screen shake, VFX, and sound for a confirmed hit."""
@@ -785,138 +712,6 @@ class Engine:
 
     # --- Phase 20: projectile helpers ---
 
-    def _fire_projectile(self, shooter: "FighterState", owner: str,
-                         gcfg: GameConfig) -> None:
-        """Create a projectile from the shooter's position and start cooldown."""
-        shoot_cfg = gcfg.actions.shoot
-        charge_frac = min(1.0, shooter.charge_ticks / max(1, shoot_cfg.max_charge_frames))
-        damage = round(shoot_cfg.min_damage + charge_frac * (shoot_cfg.max_damage - shoot_cfg.min_damage))
-        speed_sub = shoot_cfg.projectile_speed * gcfg.simulation.sub_pixel_scale
-        velocity_x = speed_sub * shooter.facing
-
-        proj = Projectile(
-            x=shooter.x,
-            y=shooter.y,
-            velocity_x=velocity_x,
-            damage=damage,
-            owner=owner,
-            charge_frac=charge_frac,
-        )
-        self._projectiles.append(proj)
-
-        # Start cooldown on the shooter
-        shooter.shoot_cooldown = shoot_cfg.cooldown_frames
-        shooter.charge_ticks = 0
-
-        # Muzzle flash VFX
-        self._pending_hit_vfx.append((shooter.x, shooter.y, False, "muzzle_flash"))
-
-    def _update_projectiles(self, state: "SimulationState",
-                             gcfg: GameConfig) -> None:
-        """Move all active projectiles and check collisions."""
-        if not self._projectiles:
-            return
-
-        arena_w = state.arena.width_sub
-        fighter_w = gcfg.fighter.width * gcfg.simulation.sub_pixel_scale
-        fighter_h = gcfg.fighter.height * gcfg.simulation.sub_pixel_scale
-
-        for proj in self._projectiles:
-            if not proj.active:
-                continue
-
-            proj.x += proj.velocity_x
-
-            # Deactivate if it leaves the arena
-            if proj.x < 0 or proj.x > arena_w:
-                proj.active = False
-                continue
-
-            # Collision with opponent fighter
-            if proj.owner == "PLAYER":
-                target = state.ai
-                target_name = "AI"
-            else:
-                target = state.player
-                target_name = "PLAYER"
-
-            # Simple AABB: projectile is a 16x16 sub-pixel region (1/6 of fighter width)
-            proj_r = fighter_w // 6
-            t_left  = target.x - fighter_w // 2
-            t_right = target.x + fighter_w // 2
-            t_top   = target.y - fighter_h
-            t_bot   = target.y
-
-            if (t_left - proj_r <= proj.x <= t_right + proj_r
-                    and t_top - proj_r <= proj.y <= t_bot + proj_r):
-                self._handle_projectile_hit(proj, target, target_name, state, gcfg)
-                proj.active = False
-
-        # Remove spent projectiles
-        self._projectiles = [p for p in self._projectiles if p.active]
-
-    def _handle_projectile_hit(self, proj: Projectile, target: "FighterState",
-                                target_name: str, state: "SimulationState",
-                                gcfg: GameConfig) -> None:
-        """Apply projectile hit damage + juice without melee HitTracker."""
-        from game.combat.damage import apply_hit as _apply_hit
-        from game.combat.state_machine import enter_hitstun as _enter_hitstun
-
-        is_heavy = proj.charge_frac >= 0.5
-
-        if target.fsm_state == FSMState.BLOCKING:
-            # Treat as a chip-only block (use guard system)
-            from game.combat.guard import apply_block_response as _abr
-            # Build a minimal hit-like object
-            class _FakeHit:
-                damage = proj.damage
-                attacker_commitment = CombatCommitment.LIGHT_ATTACK  # treat as light for guard cost
-
-            guard_broken = _abr(target, _FakeHit(), gcfg)
-            self._pending_hit_vfx.append((target.x, target.y, False, "block"))
-            if guard_broken:
-                self._sound.play_guard_break()
-                if target_name == "AI":
-                    self._ai_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
-                    self._pending_popups.append(("GUARD BREAK!", target.x, target.y, True))
-                else:
-                    self._player_guard_break_flash = _GUARD_BREAK_FLASH_FRAMES
-                    self._pending_popups.append(("GUARD BREAK!", target.x, target.y, True))
-            return
-
-        if target.fsm_state == FSMState.KO:
-            return
-
-        # Apply damage + hitstun
-        target.hp = max(0, target.hp - proj.damage)
-        if target.hp == 0:
-            from game.combat.state_machine import enter_ko as _enter_ko
-            _enter_ko(target)
-        else:
-            hitstun = 8 if is_heavy else 5
-            _enter_hitstun(target, hitstun)
-
-        # Hit flash
-        if target_name == "AI":
-            self._ai_hit_flash = _HIT_FLASH_TICKS
-        else:
-            self._player_hit_flash = _HIT_FLASH_TICKS
-
-        # VFX
-        kind = "heavy" if is_heavy else "light"
-        self._pending_hit_vfx.append((proj.x, proj.y, is_heavy, "projectile_hit"))
-        self._pending_hit_vfx.append((proj.x, proj.y, is_heavy, kind))
-
-        # Hitstop (lighter than melee)
-        self._hitstop_remaining = max(self._hitstop_remaining,
-                                      _HITSTOP_LIGHT if not is_heavy else _HITSTOP_HEAVY)
-
-        # Sound
-        if is_heavy:
-            self._sound.play_hit_heavy()
-        else:
-            self._sound.play_hit_light()
-
     def _start_match(self) -> None:
         """Initialize a new match."""
         gcfg = self._gcfg
@@ -950,13 +745,11 @@ class Engine:
         )
 
         self._ai_ctrl = BaselineAIController(rng_seed)
-        self._hit_tracker.clear()
+        # Fresh per-match simulation state: hit tracker, projectiles, previous
+        # FSM states and reaction-time bookkeeping all reset together.
+        self._sim_ctx = SimulationContext()
         self._player_ctrl.reset()
         self._game_logger.clear()
-        self._last_player_commit_tick = 0
-        self._last_ai_commit_tick = 0
-        self._prev_player_fsm = FSMState.IDLE
-        self._prev_ai_fsm = FSMState.IDLE
         self._match_end_tick = None
 
         # Reset all UX/juice state for the new match
@@ -982,8 +775,6 @@ class Engine:
         self._ai_guard_break_flash = 0
         # Phase 19: clear pending popups
         self._pending_popups.clear()
-        # Phase 20: clear projectiles
-        self._projectiles.clear()
 
         self._recorder = ReplayRecorder(self._state, self._gcfg)
 
@@ -1074,7 +865,7 @@ class Engine:
                 ai_block_flash=self._ai_block_flash,
                 player_guard_break_flash=self._player_guard_break_flash,
                 ai_guard_break_flash=self._ai_guard_break_flash,
-                projectiles=self._projectiles,
+                projectiles=self._sim_ctx.projectiles,
             )
             pygame.time.Clock().tick(30)
 
@@ -1083,39 +874,15 @@ class Engine:
     def _emit_commitment_event(self, actor: Actor,
                                commitment: CombatCommitment) -> None:
         state = self._state
+        ctx = self._sim_ctx
+        reaction = ctx.reaction_ticks(actor, state.tick_id)
         if actor == Actor.PLAYER:
-            fighter = state.player
-            opponent = state.ai
-            self._last_player_commit_tick = state.tick_id
-            reaction = state.tick_id - self._last_ai_commit_tick
+            ctx.last_player_commit_tick = state.tick_id
         else:
-            fighter = state.ai
-            opponent = state.player
-            self._last_ai_commit_tick = state.tick_id
-            reaction = state.tick_id - self._last_player_commit_tick
+            ctx.last_ai_commit_tick = state.tick_id
 
-        spacing = classify_spacing(
-            state.distance_sub(),
-            self._gcfg.spacing.close_max,
-            self._gcfg.spacing.mid_max,
-            self._gcfg.simulation.sub_pixel_scale,
-        )
-
-        event = SemanticEvent(
-            event_type=EventType.COMMITMENT_START,
-            match_id=self._match_id,
-            tick_id=state.tick_id,
-            actor=actor,
-            commitment=commitment,
-            opponent_fsm_state=opponent.fsm_state,
-            opponent_commitment=opponent.active_commitment,
-            spacing_zone=spacing,
-            actor_hp=fighter.hp,
-            opponent_hp=opponent.hp,
-            actor_stamina=fighter.stamina,
-            opponent_stamina=opponent.stamina,
-            reaction_ticks=reaction,
-        )
+        event = build_commitment_event(
+            state, self._gcfg, self._match_id, actor, commitment, reaction)
         self._game_logger.record_event(event)
         self._behavior_model.on_event(event)
         self._prediction_engine.on_event(event)
@@ -1126,57 +893,15 @@ class Engine:
             self._tactical_planner.on_player_commit(commitment, state.tick_id)
 
     def _emit_hit_event(self, attacker_actor: Actor, hit) -> None:
-        state = self._state
-        if attacker_actor == Actor.PLAYER:
-            attacker = state.player
-            defender = state.ai
-        else:
-            attacker = state.ai
-            defender = state.player
-
-        spacing = classify_spacing(
-            state.distance_sub(),
-            self._gcfg.spacing.close_max,
-            self._gcfg.spacing.mid_max,
-            self._gcfg.simulation.sub_pixel_scale,
-        )
-
-        event = SemanticEvent(
-            event_type=EventType.HIT_LANDED,
-            match_id=self._match_id,
-            tick_id=state.tick_id,
-            actor=attacker_actor,
-            commitment=hit.attacker_commitment,
-            opponent_fsm_state=defender.fsm_state,
-            spacing_zone=spacing,
-            actor_hp=attacker.hp,
-            opponent_hp=defender.hp,
-            actor_stamina=attacker.stamina,
-            opponent_stamina=defender.stamina,
-            damage_dealt=hit.damage,
-        )
+        event = build_hit_event(
+            self._state, self._gcfg, self._match_id, attacker_actor, hit)
         self._game_logger.record_event(event)
         self._behavior_model.on_event(event)
         self._prediction_engine.on_event(event)
 
     def _emit_simple_event(self, event_type: EventType, actor: Actor) -> None:
-        state = self._state
-        if actor == Actor.PLAYER:
-            fighter = state.player
-            opponent = state.ai
-        else:
-            fighter = state.ai
-            opponent = state.player
-
-        event = SemanticEvent(
-            event_type=event_type,
-            match_id=self._match_id,
-            tick_id=state.tick_id,
-            actor=actor,
-            actor_hp=fighter.hp,
-            opponent_hp=opponent.hp,
-            actor_stamina=fighter.stamina,
-            opponent_stamina=opponent.stamina,
+        event = build_simple_event(
+            self._state, self._match_id, event_type, actor
         )
         self._game_logger.record_event(event)
         self._behavior_model.on_event(event)
