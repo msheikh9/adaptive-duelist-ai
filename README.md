@@ -83,6 +83,21 @@ So the defensible reading of the ablation is:
 cross-process (recorded in one run, audited in another). Every periodic checksum
 and every final-state hash matches.
 
+Replay files are gitignored local artifacts, so a fresh clone has none and the
+audit reports `No .replay files found in replays` and exits 0. Generate some
+first — replays can now be recorded headlessly, which previously required
+playing the game by hand:
+
+```bash
+python3 -c "
+from pathlib import Path
+from ai.layers.tactical_planner import AITier
+from evaluation.match_runner import run_evaluation
+run_evaluation(n_matches=5, tier=AITier.T2_FULL_ADAPTIVE,
+               record_replays_to=Path('replays'))"
+python3 scripts/cli.py replay-audit
+```
+
 Getting there required fixing three real defects, all of the same kind — state
 mutated outside the recorded commitment stream:
 
@@ -108,6 +123,45 @@ iterating it and handed them to an RNG — so **the same seed produced different
 matches in different processes**, contradicting the project's central
 determinism claim. Fixed with an explicit `PHASE_1_COMMITMENTS_ORDERED`; repeated
 runs of the same seed now agree exactly.
+
+No in-process test can catch this, because `PYTHONHASHSEED` is fixed for an
+interpreter's lifetime. `tests/unit/test_determinism.py` therefore runs the same
+seeded match in subprocesses under differing hash seeds and compares the
+outcomes.
+
+### What the tests actually cover
+
+The suite is **1063 passing**. Each fix and each subsystem above was verified by
+reverting it and confirming a test fails — the counts below are failures observed
+with the defect deliberately restored:
+
+| Reverted fix | Tests that fail |
+|--------------|-----------------|
+| Dodge cooldown ticking | 3 |
+| Shoot cooldown ticking | 2 |
+| Guard regen ticking | 1 |
+| Gravity | 1 |
+| Projectile simulation | 1 |
+| `PHASE_1_COMMITMENTS_ORDERED` | 3 (incl. the cross-process behavioural test) |
+| T2 guard release via `BLOCK_RELEASE` | 3 |
+| Replay `total_ticks` off-by-one | 6 |
+| Unrecorded AI auto-shoot | 5 |
+| `actor='player'` lowercase in the metric | 2 |
+
+Six of those were **not** covered before this pass — the whole replay round-trip
+and the entire determinism guarantee had zero tests, which is the same class of
+unverified claim the measurement work was meant to eliminate. Coverage now lives
+in three places:
+
+- `tests/integration/test_replay_roundtrip.py` — records a real match per tier and
+  verifies it re-simulates bit-identically. This is the regression test for
+  *state mutated outside the recorded commitment stream*.
+- `tests/unit/test_simulation_step.py` — per-subsystem assertions on the shared
+  tick. Needed separately because the recorder and replayer share
+  `step_simulation`, so a subsystem dropped from it leaves them wrong *together*
+  and still agreeing.
+- `tests/unit/test_determinism.py` — cross-process seed reproducibility, plus an
+  AST check that no policy iterates the frozenset.
 
 ### Regression gates
 
@@ -149,7 +203,7 @@ Most "adaptive AI" in games is scripted difficulty scaling. This one is differen
 - **Deterministic by seed, verified.** Positions are integers and the tick order is fixed. Replay files record a state checksum every 300 ticks plus a final-state hash, and `replay-audit` passes 14/14 cross-process. Repeated runs of the same seed agree exactly.
 - **Three auditable tiers.** Swap between a uniform-random baseline (T0), Markov-only prediction (T1), and the full adaptive system (T2) at the title screen. Reported side-by-side under [Measured Results](#measured-results).
 - **Sub-pixel integer physics.** No floating-point position math. Positions are stored as `pixels × 100` for exact reproducibility.
-- **1039 passing tests.** Covers FSM transitions, physics, training pipeline, API, and full match simulations.
+- **1063 passing tests**, and the fixes above are verified by reverting each one and confirming a test fails. Covers FSM transitions, physics, the shared simulation tick, cross-process determinism, replay round-trips, the training pipeline, the API, and full match simulations.
 
 ---
 
@@ -191,7 +245,7 @@ Open:
 http://localhost:8000/ui/
 ```
 
-Run tests:
+Run tests (expect `1063 passed`; no setup or fixture data required):
 ```bash
 python3 -m pytest
 ```
@@ -398,5 +452,8 @@ anywhere else will not reach the replay stream and will break verification.
 - Add simulation logic to `game/simulation_step.py`, never to a caller. Policy
   that mutates state must go through a `CombatCommitment` so it reaches the
   replay stream.
+- When you fix a bug, revert the fix once and confirm a test fails. Six of the
+  fixes in [Measured Results](#measured-results) originally passed the full suite
+  with the bug restored.
 - Do not break regression gates
 - Session memory stays in-process (not persisted)
